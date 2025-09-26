@@ -29,3 +29,8 @@ class ValidationError(BaseModel):
 
 class HTTPValidationError(BaseModel):
     detail: List[ValidationError] # [cite: 246]
+
+class UpdateSubscriberResponse(BaseModel):
+    state: str
+    plan: str
+    mac: str

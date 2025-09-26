@@ -1,6 +1,8 @@
 # app/logic.py
 from pygnmi.client import gNMIclient
 from . import models
+from pysros.management import connect as pysros_connect
+from pysros.exceptions import SrosMgmtError
 import time
 import os
 from dotenv import load_dotenv
@@ -16,6 +18,7 @@ DEVICES = {
     "bng-principal": {
         "host": "10.100.0.29",
         "port": 57400,
+        "netconf_port": 830,
         "username": username_gnmi,
         "password": password_gnmi
     }
@@ -145,7 +148,7 @@ def create_subscriber_logic(bng: str, subscriber_data: models.Subscriber):
                     "option-number": 254,
                     "sla-profile-string": subscriber_data.plan,
                     "sub-profile-string": "DEFAULT-SUB-PROF",
-                    "subscriber-id": subscriber_data.subnatid
+                    "subscriber-id": f"{subscriber_data.subnatid}_{subscriber_data.accountidbss}"
                 },
                 "ipv4": { "address": { "pool": { "primary": subscriber_data.olt } } },
                 "ipv6": { "address-pool": subscriber_data.olt, "delegated-prefix-pool": subscriber_data.olt }
@@ -314,41 +317,76 @@ def delete_subscriber_logic(bng: str, accountidbss: str, subnatid: str, olt: str
 
 def update_subscriber_logic(bng: str, accountidbss: str, subnatid: str, update_data: models.UpdateSubscriber):
     """
-    Actualiza parcialmente un suscriptor (PATCH).
-    Solo modifica los campos proporcionados en el request body.
+    (Versión final robusta)
+    Actualiza un suscriptor, aplicando lógica de reintentos tanto para
+    la ejecución de comandos con pysros como para la actualización con pygnmi.
     """
     device_config = DEVICES.get(bng)
     if not device_config:
         raise ValueError(f"Configuración para el BNG '{bng}' no encontrada.")
 
     host_name = accountidbss
-    gnmi_base_path = "/configure/subscriber-mgmt/local-user-db[name=LUDB-SIMPLE]/ipoe"
-    gnmi_path = f"{gnmi_base_path}/host[host-name={host_name}]"
-
+    
     max_retries = 5
     retry_delay_seconds = 3
 
+    # --- PASO 1: Ejecutar comando previo con PYSROS (con reintentos) ---
+    pysros_connection = None
+    try:
+        if update_data.plan is not None:
+            command = f'tools perform subscriber-mgmt coa alc-subscr-id {subnatid}_{accountidbss} attr ["6527,13={update_data.plan}"]'
+            print(f"Ejecutando comando previo con pysros: {command}")
+            
+            for attempt in range(max_retries):
+                try:
+                    pysros_connection = pysros_connect(
+                        host=device_config["host"],
+                        username=device_config["username"],
+                        password=device_config["password"],
+                        port=device_config.get("netconf_port", 830),
+                        hostkey_verify=False
+                    )
+                    print(f"Conexión con pysros exitosa en el intento {attempt + 1}.")
+                    break
+                except SrosMgmtError as e:
+                    if "Commit or validate is in progress" in str(e):
+                        print(f"Intento de conexión {attempt + 1}/{max_retries} con pysros fallido: Commit en progreso. Reintentando...")
+                        time.sleep(retry_delay_seconds)
+                    else:
+                        raise e
+            else:
+                raise SrosMgmtError(f"No se pudo conectar con pysros después de {max_retries} intentos debido a un bloqueo persistente.")
+
+            result = pysros_connection.cli(command)
+            print(f"Resultado del comando 'tools dump': {result}")
+        
+    except (SrosMgmtError, Exception) as e:
+        raise Exception(f"Falló el comando previo con pysros: {e}")
+    finally:
+        if pysros_connection:
+            pysros_connection.disconnect()
+            
+    # --- PASO 2: Proceder con la actualización gNMI ---
+    print("Procediendo con la actualización de configuración vía gNMI...")
+    gnmi_base_path = "/configure/subscriber-mgmt/local-user-db[name=LUDB-SIMPLE]/ipoe"
+    gnmi_path = f"{gnmi_base_path}/host[host-name={host_name}]"
+
     try:
         with gNMIclient(
-            target=(device_config["host"], device_config["port"]),
+            target=(device_config["host"], device_config.get("gnmi_port", 57400)),
             username=device_config["username"],
             password=device_config["password"],
             insecure=True
         ) as client:
 
-            # --- PASO 1: VERIFICAR QUE EL SUSCRIPTOR EXISTA ---
             check_response = client.get(path=[gnmi_path])
             updates = check_response.get("notification", [{}])[0].get("update", [])
             if not (updates and "val" in updates[0]):
                 raise ValueError(f"El suscriptor '{host_name}' no existe. No se puede actualizar.")
 
-            # --- PASO 2: CONSTRUIR EL PAYLOAD PARCIAL DINÁMICAMENTE ---
             payload = {}
-            
-            # El modelo 'UpdateSubscriber' hace 'mac' obligatorio, así que siempre estará.
-            payload["host-identification"] = {"mac": update_data.mac}
-
-            # Añadimos otros campos solo si se proporcionaron en el request
+            if update_data.mac is not None:
+                payload["host-identification"] = {"mac": update_data.mac}
             if update_data.state is not None:
                 payload["admin-state"] = update_data.state
             
@@ -358,8 +396,16 @@ def update_subscriber_logic(bng: str, accountidbss: str, subnatid: str, update_d
             
             if identification_payload:
                 payload["identification"] = identification_payload
+            
+            if not payload:
+                print("No hay campos para actualizar en la configuración gNMI.")
+                host_data = updates[0]["val"]
+                return {
+                    "state": host_data.get("admin-state"),
+                    "plan": host_data.get("identification", {}).get("sla-profile-string"),
+                    "mac": host_data.get("host-identification", {}).get("mac"),
+                }
 
-            # --- PASO 3: APLICAR EL CAMBIO CON LÓGICA DE REINTENTOS ---
             for attempt in range(max_retries):
                 try:
                     client.set(update=[(gnmi_path, payload)])
@@ -367,20 +413,26 @@ def update_subscriber_logic(bng: str, accountidbss: str, subnatid: str, update_d
                     break
                 except Exception as e:
                     if "Commit or validate is in progress" in str(e):
-                        print(f"Intento {attempt + 1}/{max_retries} de actualización fallido: Commit en progreso...")
+                        print(f"Intento {attempt + 1}/{max_retries} de actualización gNMI fallido: Commit en progreso...")
                         time.sleep(retry_delay_seconds)
                     else:
                         raise e
             else:
                 raise Exception(f"No se pudo actualizar al suscriptor '{host_name}' después de {max_retries} intentos.")
 
-            # --- PASO 4: OBTENER Y DEVOLVER EL ESTADO FINAL ---
+            # --- PASO 3: OBTENER Y DEVOLVER EL ESTADO FINAL CON EL FORMATO REQUERIDO ---
             final_state_response = client.get(path=[gnmi_path])
             final_updates = final_state_response.get("notification", [{}])[0].get("update", [])
             if final_updates and "val" in final_updates[0]:
-                return {"data": final_updates[0]["val"]}
+                host_data = final_updates[0]["val"]
+                # Construimos el objeto de respuesta final y plano
+                response_object = {
+                    "state": host_data.get("admin-state"),
+                    "plan": host_data.get("identification", {}).get("sla-profile-string"),
+                    "mac": host_data.get("host-identification", {}).get("mac"),
+                }
+                return response_object
             else:
-                # Esto no debería ocurrir si la actualización fue exitosa, pero es un respaldo.
                 raise Exception("No se pudo obtener el estado final del suscriptor después de la actualización.")
 
     except ValueError:

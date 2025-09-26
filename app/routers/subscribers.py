@@ -72,7 +72,7 @@ async def delete_subscriber(
 # app/logic.py
 # (El resto del archivo se mantiene igual)
 
-@router.patch("/{bng}/{accountidbss}/{subnatid}", response_model=Any)
+@router.patch("/{bng}/{accountidbss}/{subnatid}", response_model=models.UpdateSubscriberResponse)
 async def update_subscriber(
     bng: str = Path(..., description="BNG del suscriptor"),
     accountidbss: str = Path(..., description="ID de cuenta del suscriptor"),
