@@ -11,7 +11,7 @@ RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 # Copiamos solo el archivo de requerimientos primero para aprovechar el caché de Docker
-COPY requirements.txt .
+COPY app/requirements.txt .
 
 # Instalamos las dependencias. El --no-cache-dir reduce el tamaño de la imagen
 RUN pip install --no-cache-dir --upgrade pip && \
