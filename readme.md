@@ -131,3 +131,4 @@ docker run -d --name api-bng -p 5000:5000 mi-api-bng
 ```
 
 **Nota de Seguridad:** Para un despliegue en producción real, las credenciales del dispositivo no deben estar hardcodeadas en `app/logic.py`. Se recomienda gestionarlas de forma segura a través de **variables de entorno** o un sistema de gestión de secretos.
+.
