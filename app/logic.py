@@ -170,7 +170,7 @@ def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnatid: str
             command = f'tools perform subscriber-mgmt coa alc-subscr-id {subnatid}_{accountidbss} attr ["6527,13={update_data.plan}"]'
             for attempt in range(max_retries):
                 try:
-                    pysros_connection = pysros_connect(host=device_config["host"], username=device_config["username"], password=device_config["password"], port=device_config.get("netconf_port", 830), hostkey_verify=False)
+                    pysros_connection = pysros_connect(host=device_config["host"], username=device_config["username"], password=device_config["password"], port=device_config.get("netconf_port", 830), hostkey_verify=False, allow_agent=False, look_for_keys=False)
                     break
                 except SrosMgmtError as e:
                     logger.warning(f"WARN: Intento {attempt + 1} de conexión pysros fallido: {e}")
