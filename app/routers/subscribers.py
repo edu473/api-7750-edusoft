@@ -28,12 +28,19 @@ async def create_subscriber(
     subscriber: models.Subscriber = Body(...)
 ):
     try:
-        created_subscriber = await logic.create_subscriber_logic(bng=bng, subscriber_data=subscriber)
-        return created_subscriber
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+        result = await logic.create_subscriber_logic(bng=bng, subscriber_data=subscriber)
+        if result.get("failed_nodes"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"message": "La operación de creación falló en uno o más nodos.", **result}
+            )
+        return result.get("data")
+    except HTTPException as http_exc:
+        raise http_exc # Re-lanza la excepción HTTP para que FastAPI la maneje
     except Exception as e:
+        # Captura cualquier otro error inesperado
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
 
 @router.get("/{bng}/{accountidbss}", response_model=Any)
 async def get_subscriber_by_name(
@@ -54,16 +61,20 @@ async def delete_subscriber(
     olt: str = Query(..., description="Interface de la OLT")
 ):
     try:
-        await logic.delete_subscriber_logic(bng=bng, accountidbss=accountidbss, subnatid=subnatid, olt=olt)
+        result = await logic.delete_subscriber_logic(bng=bng, accountidbss=accountidbss, subnatid=subnatid, olt=olt)
+        if result.get("failed_nodes"):
+            # Si un nodo falla, se devuelve un error 409 con el detalle
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"message": "La operación de eliminación falló en uno o más nodos.", **result}
+            )
+        # Si todos tienen éxito, se devuelve 204 No Content
         return
-    except ValueError as e:
-        error_message = str(e)
-        if "no existe" in error_message:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=error_message)
-        else:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=error_message)
+    except HTTPException as http_exc:
+        raise http_exc
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
 
 @router.patch("/{bng}/{accountidbss}/{subnatid}", response_model=models.UpdateSubscriberResponse)
 async def update_subscriber(
@@ -73,11 +84,16 @@ async def update_subscriber(
     update_data: models.UpdateSubscriber = Body(...)
 ):
     try:
-        updated_subscriber = await logic.update_subscriber_logic(
+        result = await logic.update_subscriber_logic(
             bng=bng, accountidbss=accountidbss, subnatid=subnatid, update_data=update_data
         )
-        return updated_subscriber
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+        if result.get("failed_nodes"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"message": "La operación de actualización falló en uno o más nodos.", **result}
+            )
+        return result.get("data")
+    except HTTPException as http_exc:
+        raise http_exc
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
