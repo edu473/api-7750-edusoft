@@ -25,8 +25,10 @@ COPY ./app /app/app
 # Empezamos de nuevo desde la misma base para una imagen limpia
 FROM python:3.12-slim
 
-# Creamos un usuario no-root para ejecutar la aplicación por seguridad
-RUN addgroup --system appgroup && adduser --system --group appuser
+RUN addgroup --system appgroup && \
+    adduser --system --group --home /home/appuser appuser && \
+    mkdir /home/appuser/.ssh && \
+    chown -R appuser:appgroup /home/appuser
 
 # Establecemos el directorio de trabajo
 WORKDIR /app
