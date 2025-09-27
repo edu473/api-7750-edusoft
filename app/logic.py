@@ -6,6 +6,9 @@ from pysros.management import connect as pysros_connect
 from pysros.exceptions import SrosMgmtError
 from pygnmi.client import gNMIclient
 from . import models
+import logging
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -81,7 +84,7 @@ def _internal_get_subscriber_by_name_logic(bng: str, accountidbss: str):
 def _internal_create_subscriber_logic(bng: str, subscriber_data: models.Subscriber):
     device_config = DEVICES.get(bng)
     host_name = subscriber_data.accountidbss
-    print(f"INFO: Iniciando creación de suscriptor '{host_name}' en BNG '{bng}'.")
+    logger.info(f"INFO: Iniciando creación de suscriptor '{host_name}' en BNG '{bng}'.")
     gnmi_base_path = "/configure/subscriber-mgmt/local-user-db[name=LUDB-SIMPLE]/ipoe"
     gnmi_path = f"{gnmi_base_path}/host[host-name={host_name}]"
     max_retries, retry_delay_seconds = 5, 3
@@ -103,15 +106,15 @@ def _internal_create_subscriber_logic(bng: str, subscriber_data: models.Subscrib
             "ipv4": { "address": { "pool": { "primary": subscriber_data.olt } } },
             "ipv6": { "address-pool": subscriber_data.olt, "delegated-prefix-pool": subscriber_data.olt }
         }
-        print(f"DEBUG: Payload de creación para '{host_name}': {payload}")
+        logger.info(f"DEBUG: Payload de creación para '{host_name}': {payload}")
         
         for attempt in range(max_retries):
             try:
                 client.set(update=[(gnmi_path, payload)])
-                print(f"SUCCESS: Configuración para '{host_name}' aplicada con éxito en '{bng}'.")
+                logger.info(f"SUCCESS: Configuración para '{host_name}' aplicada con éxito en '{bng}'.")
                 return f"Suscriptor '{host_name}' creado exitosamente."
             except Exception as e:
-                print(f"WARN: Intento {attempt + 1} fallido para crear '{host_name}' en '{bng}': {e}")
+                logger.warning(f"WARN: Intento {attempt + 1} fallido para crear '{host_name}' en '{bng}': {e}")
                 if "Commit or validate is in progress" in str(e):
                     time.sleep(retry_delay_seconds)
                 else: raise e
@@ -121,7 +124,7 @@ def _internal_create_subscriber_logic(bng: str, subscriber_data: models.Subscrib
 def _internal_delete_subscriber_logic(bng: str, accountidbss: str, subnatid: str, olt: str):
     device_config = DEVICES.get(bng)
     host_name = accountidbss
-    print(f"INFO: Iniciando eliminación de suscriptor '{host_name}' en BNG '{bng}'.")
+    logger.info(f"INFO: Iniciando eliminación de suscriptor '{host_name}' en BNG '{bng}'.")
     gnmi_base_path = "/configure/subscriber-mgmt/local-user-db[name=LUDB-SIMPLE]/ipoe"
     gnmi_path = f"{gnmi_base_path}/host[host-name={host_name}]"
     max_retries, retry_delay_seconds = 5, 3
@@ -144,10 +147,10 @@ def _internal_delete_subscriber_logic(bng: str, accountidbss: str, subnatid: str
         for attempt in range(max_retries):
             try:
                 client.set(delete=[gnmi_path])
-                print(f"SUCCESS: Suscriptor '{host_name}' eliminado con éxito de '{bng}'.")
+                logger.info(f"SUCCESS: Suscriptor '{host_name}' eliminado con éxito de '{bng}'.")
                 return f"Suscriptor '{host_name}' eliminado exitosamente."
             except Exception as e:
-                print(f"WARN: Intento {attempt + 1} fallido para eliminar '{host_name}' en '{bng}': {e}")
+                logger.warning(f"WARN: Intento {attempt + 1} fallido para eliminar '{host_name}' en '{bng}': {e}")
                 if "Commit or validate is in progress" in str(e):
                     time.sleep(retry_delay_seconds)
                 else: raise e
@@ -157,26 +160,26 @@ def _internal_delete_subscriber_logic(bng: str, accountidbss: str, subnatid: str
 def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnatid: str, update_data: models.UpdateSubscriber):
     device_config = DEVICES.get(bng)
     host_name = accountidbss
-    print(f"INFO: Iniciando actualización de suscriptor '{host_name}' en BNG '{bng}'.")
+    logger.info(f"INFO: Iniciando actualización de suscriptor '{host_name}' en BNG '{bng}'.")
     max_retries, retry_delay_seconds = 5, 3
     pysros_connection = None
     
     try:
         if update_data.plan is not None:
-            print(f"DEBUG: Plan no es nulo, ejecutando CoA para cambiar plan a '{update_data.plan}'.")
+            logger.info(f"DEBUG: Plan no es nulo, ejecutando CoA para cambiar plan a '{update_data.plan}'.")
             command = f'tools perform subscriber-mgmt coa alc-subscr-id {subnatid}_{accountidbss} attr ["6527,13={update_data.plan}"]'
             for attempt in range(max_retries):
                 try:
                     pysros_connection = pysros_connect(host=device_config["host"], username=device_config["username"], password=device_config["password"], port=device_config.get("netconf_port", 830), hostkey_verify=False)
                     break
                 except SrosMgmtError as e:
-                    print(f"WARN: Intento {attempt + 1} de conexión pysros fallido: {e}")
+                    logger.warning(f"WARN: Intento {attempt + 1} de conexión pysros fallido: {e}")
                     if "Commit or validate is in progress" in str(e): time.sleep(retry_delay_seconds)
                     else: raise e
             else:
                 raise SrosMgmtError("No se pudo conectar con pysros por bloqueo persistente.")
             pysros_connection.cli(command)
-            print(f"SUCCESS: Comando CoA ejecutado en '{bng}'.")
+            logger.info(f"SUCCESS: Comando CoA ejecutado en '{bng}'.")
     finally:
         if pysros_connection: pysros_connection.disconnect()
 
@@ -196,18 +199,18 @@ def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnatid: str
         if identification_payload: payload["identification"] = identification_payload
 
         if not payload:
-            print(f"INFO: No hay cambios en el payload para '{host_name}', se omite la operación 'set'.")
+            logger.info(f"INFO: No hay cambios en el payload para '{host_name}', se omite la operación 'set'.")
             host_data = updates[0]["val"]
             return {"state": host_data.get("admin-state"), "plan": host_data.get("identification", {}).get("sla-profile-string"), "mac": host_data.get("host-identification", {}).get("mac")}
 
-        print(f"DEBUG: Payload de actualización para '{host_name}': {payload}")
+        logger.info(f"DEBUG: Payload de actualización para '{host_name}': {payload}")
         for attempt in range(max_retries):
             try:
                 client.set(update=[(gnmi_path, payload)])
-                print(f"SUCCESS: Payload de actualización aplicado para '{host_name}' en '{bng}'.")
+                logger.info(f"SUCCESS: Payload de actualización aplicado para '{host_name}' en '{bng}'.")
                 break
             except Exception as e:
-                print(f"WARN: Intento {attempt + 1} fallido para actualizar '{host_name}' en '{bng}': {e}")
+                logger.warning(f"WARN: Intento {attempt + 1} fallido para actualizar '{host_name}' en '{bng}': {e}")
                 if "Commit or validate is in progress" in str(e): time.sleep(retry_delay_seconds)
                 else: raise e
         else:
@@ -231,7 +234,7 @@ async def get_all_subscribers_logic(bng: str, skip: int, limit: int):
             list_of_subscribers = await asyncio.to_thread(_internal_get_all_subscribers_logic, bng_node, skip, limit)
             return {"data": list_of_subscribers}
         except Exception as e:
-            print(f"ERROR: Fallo al consultar {bng_node} (get_all): {e}")
+            logger.error(f"ERROR: Fallo al consultar {bng_node} (get_all): {e}")
             last_error = e
     raise last_error
 
@@ -243,7 +246,7 @@ async def get_subscriber_by_name_logic(bng: str, accountidbss: str):
             subscriber_data = await asyncio.to_thread(_internal_get_subscriber_by_name_logic, bng_node, accountidbss)
             return {"data": subscriber_data}
         except Exception as e:
-            print(f"ERROR: Fallo al consultar {bng_node} (get_by_name): {e}")
+            logger.error(f"ERROR: Fallo al consultar {bng_node} (get_by_name): {e}")
             last_error = e
     raise last_error
 
@@ -258,10 +261,10 @@ async def _run_write_tasks_in_parallel(worker_func, bng_list, *args):
     for bng_node, res in zip(bng_list, results):
         if isinstance(res, Exception):
             failed_nodes[bng_node] = str(res)
-            print(f"ERROR: La operación falló en el nodo '{bng_node}': {res}")
+            logger.error(f"ERROR: La operación falló en el nodo '{bng_node}': {res}")
         else:
             successful_nodes[bng_node] = res
-            print(f"SUCCESS: La operación tuvo éxito en el nodo '{bng_node}'.")
+            logger.info(f"SUCCESS: La operación tuvo éxito en el nodo '{bng_node}'.")
 
     return {"successful_nodes": successful_nodes, "failed_nodes": failed_nodes}
 
@@ -276,7 +279,7 @@ async def create_subscriber_logic(bng: str, subscriber_data: models.Subscriber):
         # Si hay fallos, el resultado ya contiene el detalle para la excepción
         return results
 
-    print(f"INFO: Creación exitosa en todos los nodos: {list(results['successful_nodes'].keys())}. Obteniendo estado final de '{primary_bng}'.")
+    logger.info(f"INFO: Creación exitosa en todos los nodos: {list(results['successful_nodes'].keys())}. Obteniendo estado final de '{primary_bng}'.")
     final_state = await asyncio.to_thread(_internal_get_subscriber_by_name_logic, primary_bng, subscriber_data.accountidbss)
     full_sub_id = final_state.get("identification", {}).get("subscriber-id", "")
     subnatid = full_sub_id.split('_')[0] if '_' in full_sub_id else None
@@ -293,7 +296,7 @@ async def create_subscriber_logic(bng: str, subscriber_data: models.Subscriber):
     results["data"] = response_data
     return results
 
-    
+
 async def delete_subscriber_logic(bng: str, accountidbss: str, subnatid: str, olt: str):
     """Lógica de borrado en Paralelo con reporte detallado."""
     bng_list = CLUSTERS.get(bng, [bng])
@@ -310,7 +313,7 @@ async def update_subscriber_logic(bng: str, accountidbss: str, subnatid: str, up
     if results["failed_nodes"]:
         return results
 
-    print(f"INFO: Actualización exitosa en todos los nodos: {list(results['successful_nodes'].keys())}. Obteniendo estado final de '{primary_bng}'.")
+    logger.info(f"INFO: Actualización exitosa en todos los nodos: {list(results['successful_nodes'].keys())}. Obteniendo estado final de '{primary_bng}'.")
     final_state = await asyncio.to_thread(_internal_get_subscriber_by_name_logic, primary_bng, accountidbss)
     
     mapped_response = {

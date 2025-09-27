@@ -39,6 +39,8 @@ COPY --from=builder /app/app /app/app
 # Hacemos que el usuario 'appuser' sea el propietario de los archivos
 RUN chown -R appuser:appgroup /app
 
+ENV PYTHONUNBUFFERED=1
+
 # Activamos el entorno virtual para el comando final
 ENV PATH="/opt/venv/bin:$PATH"
 
@@ -53,4 +55,4 @@ EXPOSE 7750
 # -k: la clase de worker a usar (los workers de Uvicorn)
 # -b: la dirección y puerto donde escuchar
 
-CMD ["gunicorn", "-w", "8", "-k", "uvicorn.workers.UvicornWorker", "app.main:app", "-b", "0.0.0.0:7750"]
+CMD ["gunicorn", "-w", "8", "-k", "uvicorn.workers.UvicornWorker", "--log-level", "info", "--access-logfile", "-", "--error-logfile", "-", "app.main:app", "-b", "0.0.0.0:7750"]
