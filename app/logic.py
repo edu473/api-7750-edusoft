@@ -78,7 +78,7 @@ def _internal_get_subscriber_by_name_logic(bng: str, accountidbss: str):
         gnmi_response = client.get(path=[gnmi_path])
         updates = gnmi_response.get("notification", [{}])[0].get("update", [])
         if not (updates and "val" in updates[0]):
-            raise ValueError(f"Suscriptor '{accountidbss}' no encontrado en BNG '{bng}'.")
+            raise ValueError(f"Suscriptor '{accountidbss}' no encontrado.")
         return updates[0]["val"]
 
 def _internal_create_subscriber_logic(bng: str, subscriber_data: models.Subscriber):
