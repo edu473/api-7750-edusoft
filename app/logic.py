@@ -224,6 +224,97 @@ def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnatid: str
         else:
             raise Exception("No se pudo obtener el estado final del suscriptor.")
 
+
+def _internal_clear_ipoe_sessions(bng: str, customers_to_clear: dict):
+    device_config = DEVICES.get(bng)
+    max_retries, retry_delay_seconds = 5, 3
+    pysros_connection = None
+
+    if not customers_to_clear:
+        logger.info(f"No hay sesiones de suscriptor para limpiar en {bng}.")
+        return "No se requirió limpieza de sesión."
+    
+    logger.info(f"Iniciando limpieza de sesión para {len(customers_to_clear)} suscriptores en {bng}.")
+
+    try:
+        # 1. Conectar una sola vez
+        for attempt in range(max_retries):
+            try:
+                pysros_connection = pysros_connect(
+                    host=device_config["host"], 
+                    username=device_config["username"], 
+                    password=device_config["password"], 
+                    port=device_config.get("netconf_port", 830), 
+                    hostkey_verify=False
+                )
+                break
+            except SrosMgmtError as e:
+                logger.warning(f"WARN: Intento {attempt + 1} de conexión pysros fallido en '{bng}': {e}")
+                if "Commit or validate is in progress" in str(e):
+                    time.sleep(retry_delay_seconds)
+                else:
+                    raise e
+        else:
+            raise SrosMgmtError(f"No se pudo conectar con pysros a {bng} por bloqueo persistente.")
+        
+        # 2. Iterar y ejecutar un comando a la vez
+        for customer_id, data in customers_to_clear.items():
+            subscriber_id = data.get("subscriber_id")
+            interface = data.get("interface")
+            
+            if subscriber_id and interface:
+                command = f'clear service id "100" ipoe session subscriber "{subscriber_id}" interface "{interface}"'
+                logger.info(f"Ejecutando en {bng}: {command}")
+                pysros_connection.cli(command)
+            else:
+                logger.warning(f"No se pudo construir comando para {customer_id} en {bng} por falta de datos.")
+
+        logger.info(f"SUCCESS: Comandos de limpieza de sesión ejecutados en '{bng}'.")
+        return f"Limpieza de sesión exitosa para {len(customers_to_clear)} suscriptores."
+
+    finally:
+        if pysros_connection:
+            pysros_connection.disconnect()
+
+
+
+def _internal_bulk_update_state(bng: str, customers_to_update: dict, new_state: str):
+    device_config = DEVICES.get(bng)
+    gnmi_base_path = "/configure/subscriber-mgmt/local-user-db[name=LUDB-SIMPLE]/ipoe/host"
+    max_retries, retry_delay_seconds = 5, 3
+
+    # 1. Construir el payload masivo
+    update_payloads = []
+    for customer_id in customers_to_update:
+        gnmi_path = f"{gnmi_base_path}[host-name={customer_id}]"
+        payload = {"admin-state": new_state}
+        update_payloads.append((gnmi_path, payload))
+
+    if not update_payloads:
+        logger.info("No hay suscriptores para actualizar en este lote.")
+        return "No se realizaron cambios."
+
+    logger.info(f"Iniciando actualización masiva de estado para {len(update_payloads)} suscriptores en {bng}.")
+
+    # 2. Ejecutar el `set` con el payload masivo y lógica de reintentos
+    with gNMIclient(target=(device_config["host"], device_config["gnmi_port"]), username=device_config["username"], password=device_config["password"], insecure=True) as client:
+        for attempt in range(max_retries):
+            try:
+                client.set(update=update_payloads)
+                logger.info(f"SUCCESS: Actualización masiva aplicada con éxito en '{bng}'.")
+                return f"Actualización masiva exitosa para {len(update_payloads)} suscriptores."
+            except Exception as e:
+                logger.warning(f"WARN: Intento {attempt + 1} de actualización masiva fallido en '{bng}': {e}")
+                if "Commit or validate is in progress" in str(e):
+                    time.sleep(retry_delay_seconds)
+                else:
+                    raise e
+        else:
+            raise Exception(f"No se pudo aplicar la configuración masiva en {bng} tras {max_retries} intentos.")
+
+
+
+
 # --- FUNCIONES PÚBLICAS (DISPATCHERS) - GESTIONAN CLUSTERS ---
 
 async def get_all_subscribers_logic(bng: str, skip: int, limit: int):
@@ -323,3 +414,93 @@ async def update_subscriber_logic(bng: str, accountidbss: str, subnatid: str, up
     }
     results["data"] = mapped_response
     return results
+
+
+async def bulk_update_subscriber_state_logic(bng: str, request_data: models.BulkUpdateStateRequest):
+    bng_list = CLUSTERS.get(bng, [bng])
+    primary_bng = bng_list[0]
+
+    updated_customers_report = []
+    not_found_customers = []
+    customers_to_process = {}
+
+    # 1. Consultar estado inicial y datos para cada cliente
+    for customer_id in request_data.customer_ids:
+        try:
+            initial_state_data = await asyncio.to_thread(_internal_get_subscriber_by_name_logic, primary_bng, customer_id)
+            primary_pool = initial_state_data.get("ipv4", {}).get("address", {}).get("pool", {}).get("primary")
+            customers_to_process[customer_id] = {
+                "state_before": initial_state_data.get("admin-state"),
+                "subscriber_id": initial_state_data.get("identification", {}).get("subscriber-id"),
+                "interface": f"OLT-{primary_pool}" if primary_pool else None
+            }
+        except ValueError:
+            not_found_customers.append(customer_id)
+        except Exception as e:
+            updated_customers_report.append(models.CustomerState(
+                customer_id=customer_id, error=f"Error al obtener estado inicial: {e}"
+            ))
+
+    # 2. Si es 'disable', ejecutar limpieza de sesiones primero
+    if request_data.state == "disable" and customers_to_process:
+        clear_results = await _run_write_tasks_in_parallel(
+            _internal_clear_ipoe_sessions,
+            bng_list,
+            customers_to_process
+        )
+        if clear_results["failed_nodes"]:
+            # Si la limpieza falla, lo reportamos y detenemos para esos clientes
+            error_detail = ", ".join([f"{node}: {err}" for node, err in clear_results["failed_nodes"].items()])
+            for customer_id, data in customers_to_process.items():
+                updated_customers_report.append(models.CustomerState(
+                    customer_id=customer_id,
+                    state_before=data["state_before"],
+                    state_after=data["state_before"], # El estado no cambió
+                    error=f"Falló la limpieza de sesión: {error_detail}"
+                ))
+            # Devolvemos el reporte con los errores y los no encontrados
+            return models.BulkUpdateStateResponse(
+                updated_customers=updated_customers_report,
+                not_found_customers=not_found_customers
+            )
+
+    # 3. Ejecutar la actualización masiva de estado (gNMI)
+    if customers_to_process:
+        update_results = await _run_write_tasks_in_parallel(
+            _internal_bulk_update_state,
+            bng_list,
+            customers_to_process,
+            request_data.state
+        )
+
+        if update_results["failed_nodes"]:
+            # Reportar error si la actualización gNMI falla
+            error_detail = ", ".join([f"{node}: {err}" for node, err in update_results["failed_nodes"].items()])
+            for customer_id, data in customers_to_process.items():
+                updated_customers_report.append(models.CustomerState(
+                    customer_id=customer_id,
+                    state_before=data["state_before"],
+                    state_after=data["state_before"],
+                    error=f"Falló la actualización de estado: {error_detail}"
+                ))
+        else:
+            # 4. Si todo fue exitoso, consultar el estado final
+            for customer_id, data in customers_to_process.items():
+                try:
+                    final_state_data = await asyncio.to_thread(_internal_get_subscriber_by_name_logic, primary_bng, customer_id)
+                    updated_customers_report.append(models.CustomerState(
+                        customer_id=customer_id,
+                        state_before=data["state_before"],
+                        state_after=final_state_data.get("admin-state")
+                    ))
+                except Exception as e:
+                    updated_customers_report.append(models.CustomerState(
+                        customer_id=customer_id,
+                        state_before=data["state_before"],
+                        error=f"Error al obtener estado final: {e}"
+                    ))
+
+    return models.BulkUpdateStateResponse(
+        updated_customers=updated_customers_report,
+        not_found_customers=not_found_customers
+    )

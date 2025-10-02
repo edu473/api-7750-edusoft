@@ -1,7 +1,7 @@
 # app/models.py
 
 from typing import Optional, List
-from pydantic import BaseModel
+from pydantic import BaseModel, validator
 
 # Este modelo corresponde al schema "Subs" [cite: 260] y al cuerpo de la solicitud POST.
 # Pydantic valida que los datos recibidos tengan esta estructura.
@@ -34,3 +34,24 @@ class UpdateSubscriberResponse(BaseModel):
     state: str
     plan: str
     mac: str
+
+
+class BulkUpdateStateRequest(BaseModel):
+    customer_ids: List[str]
+    state: str
+
+    @validator('state')
+    def state_must_be_enable_or_disable(cls, v):
+        if v not in ['enable', 'disable']:
+            raise ValueError('El estado debe ser "enable" o "disable"')
+        return v
+
+class CustomerState(BaseModel):
+    customer_id: str
+    state_before: Optional[str] = None
+    state_after: Optional[str] = None
+    error: Optional[str] = None
+
+class BulkUpdateStateResponse(BaseModel):
+    updated_customers: List[CustomerState]
+    not_found_customers: List[str]

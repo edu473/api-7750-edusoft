@@ -97,3 +97,16 @@ async def update_subscriber(
         raise http_exc
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+
+@router.post("/{bng}/bulk-update-state", response_model=models.BulkUpdateStateResponse)
+async def bulk_update_state(
+    bng: str = Path(..., description="BNG donde se actualizarán los suscriptores"),
+    request_data: models.BulkUpdateStateRequest = Body(...)
+):
+    try:
+        result = await logic.bulk_update_subscriber_state_logic(bng=bng, request_data=request_data)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
