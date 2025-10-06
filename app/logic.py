@@ -281,7 +281,7 @@ def _internal_clear_ipoe_sessions(bng: str, customers_to_clear: dict):
 def _internal_bulk_update_state(bng: str, customers_to_update: dict, new_state: str):
     device_config = DEVICES.get(bng)
     gnmi_base_path = "/configure/subscriber-mgmt/local-user-db[name=LUDB-SIMPLE]/ipoe/host"
-    max_retries, retry_delay_seconds = 5, 3
+    max_retries, retry_delay_seconds = 20, 3
 
     # 1. Construir el payload masivo
     update_payloads = []
