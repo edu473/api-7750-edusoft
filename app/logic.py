@@ -87,7 +87,7 @@ def _internal_create_subscriber_logic(bng: str, subscriber_data: models.Subscrib
     logger.info(f"INFO: Iniciando creación de suscriptor '{host_name}' en BNG '{bng}'.")
     gnmi_base_path = "/configure/subscriber-mgmt/local-user-db[name=LUDB-SIMPLE]/ipoe"
     gnmi_path = f"{gnmi_base_path}/host[host-name={host_name}]"
-    max_retries, retry_delay_seconds = 5, 3
+    max_retries, retry_delay_seconds = 20, 3
     
     with gNMIclient(target=(device_config["host"], device_config["gnmi_port"]), username=device_config["username"], password=device_config["password"], insecure=True) as client:
         check_response = client.get(path=[gnmi_path])
@@ -127,7 +127,7 @@ def _internal_delete_subscriber_logic(bng: str, accountidbss: str, subnatid: str
     logger.info(f"INFO: Iniciando eliminación de suscriptor '{host_name}' en BNG '{bng}'.")
     gnmi_base_path = "/configure/subscriber-mgmt/local-user-db[name=LUDB-SIMPLE]/ipoe"
     gnmi_path = f"{gnmi_base_path}/host[host-name={host_name}]"
-    max_retries, retry_delay_seconds = 5, 3
+    max_retries, retry_delay_seconds = 20, 3
 
     with gNMIclient(target=(device_config["host"], device_config["gnmi_port"]), username=device_config["username"], password=device_config["password"], insecure=True) as client:
         check_response = client.get(path=[gnmi_path])
@@ -161,7 +161,7 @@ def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnatid: str
     device_config = DEVICES.get(bng)
     host_name = accountidbss
     logger.info(f"INFO: Iniciando actualización de suscriptor '{host_name}' en BNG '{bng}'.")
-    max_retries, retry_delay_seconds = 5, 3
+    max_retries, retry_delay_seconds = 20, 3
     pysros_connection = None
     
     try:
@@ -227,7 +227,7 @@ def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnatid: str
 
 def _internal_clear_ipoe_sessions(bng: str, customers_to_clear: dict):
     device_config = DEVICES.get(bng)
-    max_retries, retry_delay_seconds = 5, 3
+    max_retries, retry_delay_seconds = 20, 3
     pysros_connection = None
 
     if not customers_to_clear:
