@@ -1,11 +1,16 @@
 # app/main.py
 
 from fastapi import FastAPI
-from .routers import subscribers
 from .logging_config import setup_logging # IMPORTAMOS LA FUNCIÓN
 
-# Llama a la función para configurar el logging al iniciar la app.
 setup_logging()
+
+
+from .routers import subscribers
+
+
+# Llama a la función para configurar el logging al iniciar la app.
+
 
 # Crea la instancia principal de la aplicación FastAPI.
 # Los títulos y versiones aparecerán en la documentación de Swagger.
