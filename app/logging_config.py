@@ -42,6 +42,12 @@ LOGGING_CONFIG = {
             "propagate": False,
         },
 
+        "pygnmi": {
+            "handlers": ["default"],
+            "level": "INFO",
+            "propagate": False,
+        },
+
         # 3. Loggers de Uvicorn para ver las solicitudes entrantes.
         "uvicorn.error": {
             "level": "INFO",
@@ -55,7 +61,7 @@ LOGGING_CONFIG = {
         # 4. Logger raíz: captura todo lo demás y lo establece en WARNING.
         "": {
             "handlers": ["default"],
-            "level": "WARNING",
+            "level": "INFO",
             "propagate": False,
         },
     },
