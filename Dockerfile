@@ -57,6 +57,6 @@ EXPOSE 7750
 # -k: la clase de worker a usar (los workers de Uvicorn)
 # -b: la dirección y puerto donde escuchar
 
-#CMD ["gunicorn", "-w", "8", "-k", "uvicorn.workers.UvicornWorker", "--log-level", "info", "--access-logfile", "-", "--error-logfile", "-", "app.main:app", "-b", "0.0.0.0:7750"]
+CMD ["gunicorn", "-w", "8", "-k", "uvicorn.workers.UvicornWorker", "--log-level", "info", "--access-logfile", "-", "--error-logfile", "-", "app.main:app", "-b", "0.0.0.0:7750"]
 
-CMD ["gunicorn", "-w", "8", "-k", "uvicorn.workers.UvicornWorker", "-c", "/app/gunicorn_conf.py", "-b", "0.0.0.0:7750", "app.main:app"]
+#CMD ["gunicorn", "-w", "8", "-k", "uvicorn.workers.UvicornWorker", "-c", "/app/app/gunicorn_conf.py", "-b", "0.0.0.0:7750", "app.main:app"]
