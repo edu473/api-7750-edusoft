@@ -1,6 +1,7 @@
 # app/gunicorn_conf.py
 import logging
-from app.config.logging_config import LOGGING_CONFIG
+# CORRIGE ESTA LÍNEA
+from app.logging_config import LOGGING_CONFIG
 from logging.config import dictConfig
 
 def on_starting(server):
