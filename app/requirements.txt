@@ -4,3 +4,4 @@ gunicorn
 pygnmi
 pysros
 dotenv
+netmiko

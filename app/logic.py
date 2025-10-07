@@ -4,6 +4,8 @@ import os
 from dotenv import load_dotenv
 from pysros.management import connect as pysros_connect
 from pysros.exceptions import SrosMgmtError
+from netmiko import ConnectHandler
+from netmiko.exceptions import NetmikoTimeoutException, NetmikoAuthenticationException
 from pygnmi.client import gNMIclient
 from . import models
 import logging
@@ -320,44 +322,39 @@ def _internal_clear_ipoe_sessions(bng: str, customers_to_clear: dict):
 
 def _disconnect_netconf_sessions(bng: str):
     device_config = DEVICES.get(bng)
-    max_retries, retry_delay_seconds = 5, 2
-    pysros_connection = None
+    net_connect = None
     
-    logger.info(f"Iniciando limpieza de sesiones NETCONF en {bng} debido a saturación.")
+    logger.info(f"Iniciando limpieza de sesiones NETCONF en {bng} con Netmiko (SSH).")
+
+    # Configuración para la conexión Netmiko
+    netmiko_device = {
+        'device_type': 'nokia_sros',
+        'host':   device_config["host"],
+        'username': device_config["username"],
+        'password': device_config["password"],
+        'port': 22,
+    }
 
     try:
-        # 1. Conectar una sola vez
-        for attempt in range(max_retries):
-            try:
-                pysros_connection = pysros_connect(
-                    host=device_config["host"], 
-                    username=device_config["username"], 
-                    password=device_config["password"], 
-                    port=device_config.get("netconf_port", 830), 
-                    hostkey_verify=False
-                )
-                break
-            except SrosMgmtError as e:
-                logger.warning(f"WARN: Intento {attempt + 1} de conexión para limpieza fallido en '{bng}': {e}")
-                if ("Commit or validate is in progress" in str(e)) or ("Database write access is not available" in str(e)):
-                    time.sleep(retry_delay_seconds)
-                else:
-                    raise e
-        else:
-            raise SrosMgmtError(f"No se pudo conectar con pysros a {bng} para limpiar sesiones.")
-        
-        # 2. Ejecutar comando de desconexión
-        # NOTA: Este es un comando administrativo potente. Asegúrate de que los permisos son correctos.
-        command = 'admin disconnect session-type netconf'
-        logger.info(f"Ejecutando en {bng}: {command}")
-        pysros_connection.cli(command)
+        # 1. Conectar una sola vez vía SSH
+        net_connect = ConnectHandler(**netmiko_device)
 
-        logger.info(f"SUCCESS: Comando de limpieza de sesiones NETCONF ejecutado en '{bng}'.")
-        return "Limpieza de sesiones NETCONF exitosa."
+        command = f'admin disconnect session-type netconf'
+        logger.info(f"Ejecutando en {bng}: Desconectando sesiones NETCONF")
+        net_connect.send_command(command, read_timeout=60)
+    
+        logger.info(f"SUCCESS: Se desconectaron las sesiones NETCONF en '{bng}'.")
+        return "Limpieza de sesiones NETCONF finalizada."
 
+    except (NetmikoTimeoutException, NetmikoAuthenticationException) as e:
+        logger.error(f"Error de conexión Netmiko al limpiar sesiones en {bng}: {e}")
+        raise e # Relanzar la excepción para que el bucle de reintentos principal la vea
     finally:
-        if pysros_connection:
-            pysros_connection.disconnect()
+        if net_connect:
+            net_connect.disconnect()
+            logger.info(f"Sesión de limpieza Netmiko desconectada de {bng}.")
+
+
 
 def _internal_bulk_update_state(bng: str, customers_to_update: dict, new_state: str):
     device_config = DEVICES.get(bng)
