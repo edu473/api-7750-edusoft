@@ -305,7 +305,7 @@ def _internal_bulk_update_state(bng: str, customers_to_update: dict, new_state: 
                 return f"Actualización masiva exitosa para {len(update_payloads)} suscriptores."
             except Exception as e:
                 logger.warning(f"WARN: Intento {attempt + 1} de actualización masiva fallido en '{bng}': {e}")
-                if "Commit or validate is in progress" in str(e):
+                if ("Commit or validate is in progress" in str(e)) or ("Database write access is not available" in str(e)):
                     time.sleep(retry_delay_seconds)
                 else:
                     raise e
