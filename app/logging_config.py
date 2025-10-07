@@ -4,7 +4,7 @@ from logging.config import dictConfig
 
 LOGGING_CONFIG = {
     "version": 1,
-    "disable_existing_loggers": False,
+    "disable_existing_loggers": True,
     "formatters": {
         "default": {
             "format": "%(asctime)s - %(levelname)s - %(name)s - %(message)s",
