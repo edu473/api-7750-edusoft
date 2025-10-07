@@ -122,6 +122,7 @@ def _internal_create_subscriber_logic(bng: str, subscriber_data: models.Subscrib
                     try:
                         _disconnect_netconf_sessions(bng)
                         time.sleep(retry_delay_seconds)
+                        continue
                     except Exception as disconnect_e:
                         logger.error(f"Error al intentar limpiar sesiones en {bng}: {disconnect_e}")
 
@@ -166,6 +167,7 @@ def _internal_delete_subscriber_logic(bng: str, accountidbss: str, subnatid: str
                     try:
                         _disconnect_netconf_sessions(bng)
                         time.sleep(retry_delay_seconds)
+                        continue
                     except Exception as disconnect_e:
                         logger.error(f"Error al intentar limpiar sesiones en {bng}: {disconnect_e}")
 
@@ -244,6 +246,7 @@ def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnatid: str
                     try:
                         _disconnect_netconf_sessions(bng)
                         time.sleep(retry_delay_seconds)
+                        continue
                     except Exception as disconnect_e:
                         logger.error(f"Error al intentar limpiar sesiones en {bng}: {disconnect_e}")
 
@@ -291,6 +294,7 @@ def _internal_clear_ipoe_sessions(bng: str, customers_to_clear: dict):
                     try:
                         _disconnect_netconf_sessions(bng)
                         time.sleep(retry_delay_seconds)
+                        continue
                     except Exception as disconnect_e:
                         logger.error(f"Error al intentar limpiar sesiones en {bng}: {disconnect_e}")
 
@@ -387,6 +391,7 @@ def _internal_bulk_update_state(bng: str, customers_to_update: dict, new_state: 
                     try:
                         _disconnect_netconf_sessions(bng)
                         time.sleep(retry_delay_seconds)
+                        continue
                     except Exception as disconnect_e:
                         logger.error(f"Error al intentar limpiar sesiones en {bng}: {disconnect_e}")
                         
