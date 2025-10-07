@@ -115,7 +115,15 @@ def _internal_create_subscriber_logic(bng: str, subscriber_data: models.Subscrib
                 return f"Suscriptor '{host_name}' creado exitosamente."
             except Exception as e:
                 logger.warning(f"WARN: Intento {attempt + 1} fallido para crear '{host_name}' en '{bng}': {e}", exc_info=True)
-                if "Commit or validate is in progress" in str(e):
+
+                if "reached maximum number of private sessions" in str(e):
+                    try:
+                        _disconnect_netconf_sessions(bng)
+                        time.sleep(retry_delay_seconds)
+                    except Exception as disconnect_e:
+                        logger.error(f"Error al intentar limpiar sesiones en {bng}: {disconnect_e}")
+
+                if ("Commit or validate is in progress" in str(e)) or ("Database write access is not available" in str(e)):
                     time.sleep(retry_delay_seconds)
                 else: raise e
         else:
@@ -151,7 +159,16 @@ def _internal_delete_subscriber_logic(bng: str, accountidbss: str, subnatid: str
                 return f"Suscriptor '{host_name}' eliminado exitosamente."
             except Exception as e:
                 logger.warning(f"WARN: Intento {attempt + 1} fallido para eliminar '{host_name}' en '{bng}': {e}", exc_info=True)
-                if "Commit or validate is in progress" in str(e):
+
+                if "reached maximum number of private sessions" in str(e):
+                    try:
+                        _disconnect_netconf_sessions(bng)
+                        time.sleep(retry_delay_seconds)
+                    except Exception as disconnect_e:
+                        logger.error(f"Error al intentar limpiar sesiones en {bng}: {disconnect_e}")
+
+
+                if ("Commit or validate is in progress" in str(e)) or ("Database write access is not available" in str(e)):
                     time.sleep(retry_delay_seconds)
                 else: raise e
         else:
@@ -174,7 +191,16 @@ def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnatid: str
                     break
                 except SrosMgmtError as e:
                     logger.warning(f"WARN: Intento {attempt + 1} de conexión pysros fallido: {e}", exc_info=True)
-                    if "Commit or validate is in progress" in str(e): time.sleep(retry_delay_seconds)
+
+                    if "reached maximum number of private sessions" in str(e):
+                        try:
+                            _disconnect_netconf_sessions(bng)
+                            time.sleep(retry_delay_seconds)
+                        except Exception as disconnect_e:
+                            logger.error(f"Error al intentar limpiar sesiones en {bng}: {disconnect_e}")
+
+
+                    if ("Commit or validate is in progress" in str(e)) or ("Database write access is not available" in str(e)): time.sleep(retry_delay_seconds)
                     else: raise e
             else:
                 raise SrosMgmtError("No se pudo conectar con pysros por bloqueo persistente.")
@@ -211,7 +237,16 @@ def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnatid: str
                 break
             except Exception as e:
                 logger.warning(f"WARN: Intento {attempt + 1} fallido para actualizar '{host_name}' en '{bng}': {e}", exc_info=True)
-                if "Commit or validate is in progress" in str(e): time.sleep(retry_delay_seconds)
+
+                if "reached maximum number of private sessions" in str(e):
+                    try:
+                        _disconnect_netconf_sessions(bng)
+                        time.sleep(retry_delay_seconds)
+                    except Exception as disconnect_e:
+                        logger.error(f"Error al intentar limpiar sesiones en {bng}: {disconnect_e}")
+
+
+                if ("Commit or validate is in progress" in str(e)) or ("Database write access is not available" in str(e)): time.sleep(retry_delay_seconds)
                 else: raise e
         else:
             raise Exception(f"No se pudo actualizar al suscriptor '{host_name}'.")
@@ -250,7 +285,14 @@ def _internal_clear_ipoe_sessions(bng: str, customers_to_clear: dict):
                 break
             except SrosMgmtError as e:
                 logger.warning(f"WARN: Intento {attempt + 1} de conexión pysros fallido en '{bng}': {e}")
-                if "Commit or validate is in progress" in str(e):
+                if "reached maximum number of private sessions" in str(e):
+                    try:
+                        _disconnect_netconf_sessions(bng)
+                        time.sleep(retry_delay_seconds)
+                    except Exception as disconnect_e:
+                        logger.error(f"Error al intentar limpiar sesiones en {bng}: {disconnect_e}")
+
+                if ("Commit or validate is in progress" in str(e)) or ("Database write access is not available" in str(e)):
                     time.sleep(retry_delay_seconds)
                 else:
                     raise e
@@ -276,7 +318,46 @@ def _internal_clear_ipoe_sessions(bng: str, customers_to_clear: dict):
         if pysros_connection:
             pysros_connection.disconnect()
 
+def _disconnect_netconf_sessions(bng: str):
+    device_config = DEVICES.get(bng)
+    max_retries, retry_delay_seconds = 5, 2
+    pysros_connection = None
+    
+    logger.info(f"Iniciando limpieza de sesiones NETCONF en {bng} debido a saturación.")
 
+    try:
+        # 1. Conectar una sola vez
+        for attempt in range(max_retries):
+            try:
+                pysros_connection = pysros_connect(
+                    host=device_config["host"], 
+                    username=device_config["username"], 
+                    password=device_config["password"], 
+                    port=device_config.get("netconf_port", 830), 
+                    hostkey_verify=False
+                )
+                break
+            except SrosMgmtError as e:
+                logger.warning(f"WARN: Intento {attempt + 1} de conexión para limpieza fallido en '{bng}': {e}")
+                if ("Commit or validate is in progress" in str(e)) or ("Database write access is not available" in str(e)):
+                    time.sleep(retry_delay_seconds)
+                else:
+                    raise e
+        else:
+            raise SrosMgmtError(f"No se pudo conectar con pysros a {bng} para limpiar sesiones.")
+        
+        # 2. Ejecutar comando de desconexión
+        # NOTA: Este es un comando administrativo potente. Asegúrate de que los permisos son correctos.
+        command = 'admin disconnect session-type netconf'
+        logger.info(f"Ejecutando en {bng}: {command}")
+        pysros_connection.cli(command)
+
+        logger.info(f"SUCCESS: Comando de limpieza de sesiones NETCONF ejecutado en '{bng}'.")
+        return "Limpieza de sesiones NETCONF exitosa."
+
+    finally:
+        if pysros_connection:
+            pysros_connection.disconnect()
 
 def _internal_bulk_update_state(bng: str, customers_to_update: dict, new_state: str):
     device_config = DEVICES.get(bng)
@@ -305,6 +386,13 @@ def _internal_bulk_update_state(bng: str, customers_to_update: dict, new_state: 
                 return f"Actualización masiva exitosa para {len(update_payloads)} suscriptores."
             except Exception as e:
                 logger.warning(f"WARN: Intento {attempt + 1} de actualización masiva fallido en '{bng}': {e}")
+                if "reached maximum number of private sessions" in str(e):
+                    try:
+                        _disconnect_netconf_sessions(bng)
+                        time.sleep(retry_delay_seconds)
+                    except Exception as disconnect_e:
+                        logger.error(f"Error al intentar limpiar sesiones en {bng}: {disconnect_e}")
+                        
                 if ("Commit or validate is in progress" in str(e)) or ("Database write access is not available" in str(e)):
                     time.sleep(retry_delay_seconds)
                 else:
