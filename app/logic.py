@@ -263,7 +263,7 @@ def _internal_clear_ipoe_sessions(bng: str, customers_to_clear: dict):
             interface = data.get("interface")
             
             if subscriber_id and interface:
-                command = f'clear service id "100" ipoe session subscriber "{subscriber_id}" interface "{interface}"'
+                command = f'clear service id "100" ipoe session subscriber "{subscriber_id}" interface "SUBSCRIBER-INTERFACE-1"'
                 logger.info(f"Ejecutando en {bng}: {command}")
                 pysros_connection.cli(command)
             else:
@@ -441,7 +441,45 @@ async def bulk_update_subscriber_state_logic(bng: str, request_data: models.Bulk
                 customer_id=customer_id, error=f"Error al obtener estado inicial: {e}"
             ))
 
-    # 2. Si es 'disable', ejecutar limpieza de sesiones primero
+    
+
+    # 2. Ejecutar la actualización masiva de estado (gNMI)
+    if customers_to_process:
+        update_results = await _run_write_tasks_in_parallel(
+            _internal_bulk_update_state,
+            bng_list,
+            customers_to_process,
+            request_data.state
+        )
+
+        if update_results["failed_nodes"]:
+            # Reportar error si la actualización gNMI falla
+            error_detail = ", ".join([f"{node}: {err}" for node, err in update_results["failed_nodes"].items()])
+            for customer_id, data in customers_to_process.items():
+                updated_customers_report.append(models.CustomerState(
+                    customer_id=customer_id,
+                    state_before=data["state_before"],
+                    state_after=data["state_before"],
+                    error=f"Falló la actualización de estado: {error_detail}"
+                ))
+        else:
+            # 3. Si todo fue exitoso, consultar el estado final
+            for customer_id, data in customers_to_process.items():
+                try:
+                    final_state_data = await asyncio.to_thread(_internal_get_subscriber_by_name_logic, primary_bng, customer_id)
+                    updated_customers_report.append(models.CustomerState(
+                        customer_id=customer_id,
+                        state_before=data["state_before"],
+                        state_after=final_state_data.get("admin-state")
+                    ))
+                except Exception as e:
+                    updated_customers_report.append(models.CustomerState(
+                        customer_id=customer_id,
+                        state_before=data["state_before"],
+                        error=f"Error al obtener estado final: {e}"
+                    ))
+    
+    # 4. Si es 'disable', ejecutar limpieza de sesiones primero
     if request_data.state == "disable" and customers_to_process:
         clear_results = await _run_write_tasks_in_parallel(
             _internal_clear_ipoe_sessions,
@@ -463,42 +501,6 @@ async def bulk_update_subscriber_state_logic(bng: str, request_data: models.Bulk
                 updated_customers=updated_customers_report,
                 not_found_customers=not_found_customers
             )
-
-    # 3. Ejecutar la actualización masiva de estado (gNMI)
-    if customers_to_process:
-        update_results = await _run_write_tasks_in_parallel(
-            _internal_bulk_update_state,
-            bng_list,
-            customers_to_process,
-            request_data.state
-        )
-
-        if update_results["failed_nodes"]:
-            # Reportar error si la actualización gNMI falla
-            error_detail = ", ".join([f"{node}: {err}" for node, err in update_results["failed_nodes"].items()])
-            for customer_id, data in customers_to_process.items():
-                updated_customers_report.append(models.CustomerState(
-                    customer_id=customer_id,
-                    state_before=data["state_before"],
-                    state_after=data["state_before"],
-                    error=f"Falló la actualización de estado: {error_detail}"
-                ))
-        else:
-            # 4. Si todo fue exitoso, consultar el estado final
-            for customer_id, data in customers_to_process.items():
-                try:
-                    final_state_data = await asyncio.to_thread(_internal_get_subscriber_by_name_logic, primary_bng, customer_id)
-                    updated_customers_report.append(models.CustomerState(
-                        customer_id=customer_id,
-                        state_before=data["state_before"],
-                        state_after=final_state_data.get("admin-state")
-                    ))
-                except Exception as e:
-                    updated_customers_report.append(models.CustomerState(
-                        customer_id=customer_id,
-                        state_before=data["state_before"],
-                        error=f"Error al obtener estado final: {e}"
-                    ))
 
     return models.BulkUpdateStateResponse(
         updated_customers=updated_customers_report,
