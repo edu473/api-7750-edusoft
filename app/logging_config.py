@@ -26,7 +26,7 @@ LOGGING_CONFIG = {
         "app": {
             "handlers": ["default"],
             "level": "INFO",
-            "propagate": False,
+            "propagate": True,
         },
 
         # 2. Silenciamos los loggers de librerías de terceros.

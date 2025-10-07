@@ -8,7 +8,7 @@ from pygnmi.client import gNMIclient
 from . import models
 import logging
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("app")
 
 load_dotenv()
 
@@ -114,7 +114,7 @@ def _internal_create_subscriber_logic(bng: str, subscriber_data: models.Subscrib
                 logger.info(f"SUCCESS: Configuración para '{host_name}' aplicada con éxito en '{bng}'.")
                 return f"Suscriptor '{host_name}' creado exitosamente."
             except Exception as e:
-                logger.warning(f"WARN: Intento {attempt + 1} fallido para crear '{host_name}' en '{bng}': {e}")
+                logger.warning(f"WARN: Intento {attempt + 1} fallido para crear '{host_name}' en '{bng}': {e}", exc_info=True)
                 if "Commit or validate is in progress" in str(e):
                     time.sleep(retry_delay_seconds)
                 else: raise e
@@ -150,7 +150,7 @@ def _internal_delete_subscriber_logic(bng: str, accountidbss: str, subnatid: str
                 logger.info(f"SUCCESS: Suscriptor '{host_name}' eliminado con éxito de '{bng}'.")
                 return f"Suscriptor '{host_name}' eliminado exitosamente."
             except Exception as e:
-                logger.warning(f"WARN: Intento {attempt + 1} fallido para eliminar '{host_name}' en '{bng}': {e}")
+                logger.warning(f"WARN: Intento {attempt + 1} fallido para eliminar '{host_name}' en '{bng}': {e}", exc_info=True)
                 if "Commit or validate is in progress" in str(e):
                     time.sleep(retry_delay_seconds)
                 else: raise e
@@ -173,7 +173,7 @@ def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnatid: str
                     pysros_connection = pysros_connect(host=device_config["host"], username=device_config["username"], password=device_config["password"], port=device_config.get("netconf_port", 830), hostkey_verify=False)
                     break
                 except SrosMgmtError as e:
-                    logger.warning(f"WARN: Intento {attempt + 1} de conexión pysros fallido: {e}")
+                    logger.warning(f"WARN: Intento {attempt + 1} de conexión pysros fallido: {e}", exc_info=True)
                     if "Commit or validate is in progress" in str(e): time.sleep(retry_delay_seconds)
                     else: raise e
             else:
@@ -210,7 +210,7 @@ def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnatid: str
                 logger.info(f"SUCCESS: Payload de actualización aplicado para '{host_name}' en '{bng}'.")
                 break
             except Exception as e:
-                logger.warning(f"WARN: Intento {attempt + 1} fallido para actualizar '{host_name}' en '{bng}': {e}")
+                logger.warning(f"WARN: Intento {attempt + 1} fallido para actualizar '{host_name}' en '{bng}': {e}", exc_info=True)
                 if "Commit or validate is in progress" in str(e): time.sleep(retry_delay_seconds)
                 else: raise e
         else:
