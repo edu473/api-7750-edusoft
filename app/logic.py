@@ -184,32 +184,39 @@ async def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnati
             device_config = DEVICES.get(bng)
             host_name = accountidbss
             logger.info(f"INFO: Iniciando actualización de suscriptor '{host_name}' en BNG '{bng}'.")
+
             if update_data.plan is not None:
                 _execute_coa_with_retries(bng, subnatid, accountidbss, update_data.plan)
-            with gNMIclient(target=(device_config["host"], device_config.get("gnmi_port", 57400)), username=device_config["username"], password=device_config["password"], insecure=True, timeout=10) as client:
-                gnmi_path = f"/configure/subscriber-mgmt/local-user-db[name=LUDB-SIMPLE]/ipoe/host[host-name={host_name}]"
-                check_response = client.get(path=[gnmi_path])
-                updates = check_response.get("notification", [{}])[0].get("update", [])
-                if not (updates and "val" in updates[0]):
-                    raise ValueError(f"El suscriptor '{host_name}' no existe.")
-                payload = {}
-                if update_data.mac is not None: payload["host-identification"] = {"mac": update_data.mac}
-                if update_data.state is not None: payload["admin-state"] = update_data.state
-                identification_payload = {}
-                if update_data.plan is not None: identification_payload["sla-profile-string"] = update_data.plan
-                if identification_payload: payload["identification"] = identification_payload
-                if not payload:
-                    logger.info(f"INFO: No hay cambios en el payload para '{host_name}', se omite la operación 'set'.")
-                    host_data = updates[0]["val"]
-                    return {"state": host_data.get("admin-state"), "plan": host_data.get("identification", {}).get("sla-profile-string"), "mac": host_data.get("host-identification", {}).get("mac")}
-                logger.info(f"DEBUG: Payload de actualización para '{host_name}': {payload}")
-                max_total_retries = 20
-                timeout_error_count = 0
-                max_timeout_errors = 20
-                for attempt in range(max_total_retries):
-                    try:
+
+            max_total_retries = 20
+            timeout_error_count = 0
+            max_timeout_errors = 20
+            for attempt in range(max_total_retries):
+                try:
+                    with gNMIclient(target=(device_config["host"], device_config.get("gnmi_port", 57400)), username=device_config["username"], password=device_config["password"], insecure=True, timeout=10) as client:
+                        gnmi_path = f"/configure/subscriber-mgmt/local-user-db[name=LUDB-SIMPLE]/ipoe/host[host-name={host_name}]"
+                        check_response = client.get(path=[gnmi_path])
+                        updates = check_response.get("notification", [{}])[0].get("update", [])
+                        if not (updates and "val" in updates[0]):
+                            raise ValueError(f"El suscriptor '{host_name}' no existe.")
+                        
+                        payload = {}
+                        if update_data.mac is not None: payload["host-identification"] = {"mac": update_data.mac}
+                        if update_data.state is not None: payload["admin-state"] = update_data.state
+                        identification_payload = {}
+                        if update_data.plan is not None: identification_payload["sla-profile-string"] = update_data.plan
+                        if identification_payload: payload["identification"] = identification_payload
+
+                        if not payload:
+                            logger.info(f"INFO: No hay cambios en el payload para '{host_name}', se omite la operación 'set'.")
+                            host_data = updates[0]["val"]
+                            return {"state": host_data.get("admin-state"), "plan": host_data.get("identification", {}).get("sla-profile-string"), "mac": host_data.get("host-identification", {}).get("mac")}
+
+                        logger.info(f"DEBUG: (Intento {attempt + 1}) Payload de actualización para '{host_name}': {payload}")
+                        
                         client.set(update=[(gnmi_path, payload)])
                         logger.info(f"SUCCESS: Payload de actualización aplicado para '{host_name}' en '{bng}'.")
+                        
                         final_state_response = client.get(path=[gnmi_path])
                         final_updates = final_state_response.get("notification", [{}])[0].get("update", [])
                         if final_updates and "val" in final_updates[0]:
@@ -217,24 +224,27 @@ async def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnati
                             return {"state": host_data.get("admin-state"), "plan": host_data.get("identification", {}).get("sla-profile-string"), "mac": host_data.get("host-identification", {}).get("mac")}
                         else:
                             raise Exception("No se pudo obtener el estado final del suscriptor.")
-                    except Exception as e:
-                        logger.warning(f"WARN: Intento {attempt + 1}/{max_total_retries} fallido para actualizar '{host_name}' en '{bng}': {repr(e)}")
-                        if "Timeout" in repr(e) or "timeout" in repr(e):
-                            timeout_error_count += 1
-                            if timeout_error_count >= max_timeout_errors:
-                                raise Exception(f"La operación falló por timeout después de {max_timeout_errors} intentos.")
-                            time.sleep(3)
-                            continue
-                        elif "reached maximum number of private sessions" in str(e):
-                            _disconnect_netconf_sessions(bng)
-                            time.sleep(1)
-                            continue
-                        elif "Commit or validate is in progress" in str(e) or "Database write access is not available" in str(e):
-                            time.sleep(3)
-                            continue
-                        else:
-                            raise e
-                raise Exception(f"No se pudo actualizar al suscriptor '{host_name}'.")
+
+                except Exception as e:
+                    logger.warning(f"WARN: Intento {attempt + 1}/{max_total_retries} fallido para actualizar '{host_name}' en '{bng}': {repr(e)}")
+                    if "Timeout" in repr(e) or "timeout" in repr(e):
+                        timeout_error_count += 1
+                        if timeout_error_count >= max_timeout_errors:
+                            raise Exception(f"La operación falló por timeout después de {max_timeout_errors} intentos.")
+                        time.sleep(2)
+                        continue
+                    elif "reached maximum number of private sessions" in str(e):
+                        _disconnect_netconf_sessions(bng)
+                        time.sleep(1)
+                        continue
+                    elif "Commit or validate is in progress" in str(e) or "Database write access is not available" in str(e):
+                        time.sleep(2)
+                        continue
+                    else:
+                        raise e
+            
+            raise Exception(f"No se pudo actualizar al suscriptor '{host_name}'.")
+        
         return await asyncio.to_thread(task)
 
 def _execute_coa_with_retries(bng, subnatid, accountidbss, plan):
