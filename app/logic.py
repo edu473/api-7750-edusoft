@@ -91,20 +91,17 @@ async def _internal_create_subscriber_logic(bng: str, subscriber_data: models.Su
             max_total_retries = 6
             timeout_error_count = 0
             max_timeout_errors = 3
-            
             for attempt in range(max_total_retries):
                 try:
                     device_config = DEVICES.get(bng)
                     logger.info(f"INFO: (Intento {attempt + 1}) Creando suscriptor '{host_name}' en BNG '{bng}'.")
                     gnmi_base_path = "/configure/subscriber-mgmt/local-user-db[name=LUDB-SIMPLE]/ipoe"
                     gnmi_path = f"{gnmi_base_path}/host[host-name={host_name}]"
-                    
                     with gNMIclient(target=(device_config["host"], device_config["gnmi_port"]), username=device_config["username"], password=device_config["password"], insecure=True, timeout=10) as client:
                         check_response = client.get(path=[gnmi_path])
                         updates = check_response.get("notification", [{}])[0].get("update", [])
                         if updates and "val" in updates[0]:
                             raise ValueError(f"El suscriptor '{host_name}' ya existe en {bng}.")
-                        
                         payload = {
                             "host-name": host_name, "admin-state": subscriber_data.state,
                             "host-identification": { "mac": subscriber_data.mac },
@@ -115,7 +112,6 @@ async def _internal_create_subscriber_logic(bng: str, subscriber_data: models.Su
                         client.set(update=[(gnmi_path, payload)])
                         logger.info(f"SUCCESS: Configuración para '{host_name}' aplicada con éxito en '{bng}'.")
                         return f"Suscriptor '{host_name}' creado exitosamente."
-
                 except Exception as e:
                     logger.warning(f"WARN: Intento {attempt + 1}/{max_total_retries} fallido para crear '{host_name}' en '{bng}': {repr(e)}")
                     if "Timeout" in repr(e) or "timeout" in repr(e):
@@ -129,11 +125,10 @@ async def _internal_create_subscriber_logic(bng: str, subscriber_data: models.Su
                         time.sleep(1)
                         continue
                     elif "Commit or validate is in progress" in str(e) or "Database write access is not available" in str(e):
-                        time.sleep(2) # Espera un poco más para contención de commits
+                        time.sleep(2)
                         continue
                     else:
                         raise e
-            
             raise Exception(f"No se pudo aplicar config para '{host_name}' en {bng} tras {max_total_retries} intentos.")
         return await asyncio.to_thread(task)
 
@@ -144,7 +139,6 @@ async def _internal_delete_subscriber_logic(bng: str, accountidbss: str, subnati
             max_total_retries = 6
             timeout_error_count = 0
             max_timeout_errors = 3
-
             for attempt in range(max_total_retries):
                 try:
                     device_config = DEVICES.get(bng)
@@ -156,17 +150,14 @@ async def _internal_delete_subscriber_logic(bng: str, accountidbss: str, subnati
                         updates = check_response.get("notification", [{}])[0].get("update", [])
                         if not (updates and "val" in updates[0]):
                             raise ValueError(f"El suscriptor '{host_name}' no existe en {bng}.")
-                        
                         host_data = updates[0]["val"]
                         if host_data.get("identification", {}).get("subscriber-id") != f"{subnatid}_{accountidbss}":
                             raise ValueError(f"Conflicto de datos en {bng}: El subnatid no coincide para '{host_name}'.")
                         if host_data.get("ipv4", {}).get("address", {}).get("pool", {}).get("primary") != olt:
                             raise ValueError(f"Conflicto de datos en {bng}: La OLT/Pool no coincide para '{host_name}'.")
-
                         client.set(delete=[gnmi_path])
                         logger.info(f"SUCCESS: Suscriptor '{host_name}' eliminado con éxito de '{bng}'.")
                         return f"Suscriptor '{host_name}' eliminado exitosamente."
-
                 except Exception as e:
                     logger.warning(f"WARN: Intento {attempt + 1}/{max_total_retries} fallido para eliminar '{host_name}' en '{bng}': {repr(e)}")
                     if "Timeout" in repr(e) or "timeout" in repr(e):
@@ -184,47 +175,34 @@ async def _internal_delete_subscriber_logic(bng: str, accountidbss: str, subnati
                         continue
                     else:
                         raise e
-            
             raise Exception(f"No se pudo eliminar al suscriptor '{host_name}' de {bng} tras {max_total_retries} intentos.")
         return await asyncio.to_thread(task)
 
 async def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnatid: str, update_data: models.UpdateSubscriber):
     async with BNG_WRITE_LOCKS[bng]:
-        # CoA and other logic can be complex, so we wrap the whole thing
         def task():
-            # This part remains mostly synchronous, so we don't add the retry loop here
-            # but we ensure the gNMI part inside has a timeout
             device_config = DEVICES.get(bng)
             host_name = accountidbss
             logger.info(f"INFO: Iniciando actualización de suscriptor '{host_name}' en BNG '{bng}'.")
-            
             if update_data.plan is not None:
-                # This part has its own retry logic for pysros, we keep it
                 _execute_coa_with_retries(bng, subnatid, accountidbss, update_data.plan)
-
             with gNMIclient(target=(device_config["host"], device_config.get("gnmi_port", 57400)), username=device_config["username"], password=device_config["password"], insecure=True, timeout=10) as client:
                 gnmi_path = f"/configure/subscriber-mgmt/local-user-db[name=LUDB-SIMPLE]/ipoe/host[host-name={host_name}]"
                 check_response = client.get(path=[gnmi_path])
                 updates = check_response.get("notification", [{}])[0].get("update", [])
                 if not (updates and "val" in updates[0]):
                     raise ValueError(f"El suscriptor '{host_name}' no existe.")
-                
                 payload = {}
                 if update_data.mac is not None: payload["host-identification"] = {"mac": update_data.mac}
                 if update_data.state is not None: payload["admin-state"] = update_data.state
-                
                 identification_payload = {}
                 if update_data.plan is not None: identification_payload["sla-profile-string"] = update_data.plan
                 if identification_payload: payload["identification"] = identification_payload
-
                 if not payload:
                     logger.info(f"INFO: No hay cambios en el payload para '{host_name}', se omite la operación 'set'.")
                     host_data = updates[0]["val"]
                     return {"state": host_data.get("admin-state"), "plan": host_data.get("identification", {}).get("sla-profile-string"), "mac": host_data.get("host-identification", {}).get("mac")}
-
                 logger.info(f"DEBUG: Payload de actualización para '{host_name}': {payload}")
-                
-                # We can add the retry logic just for the `set` operation
                 max_total_retries = 6
                 timeout_error_count = 0
                 max_timeout_errors = 3
@@ -232,7 +210,6 @@ async def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnati
                     try:
                         client.set(update=[(gnmi_path, payload)])
                         logger.info(f"SUCCESS: Payload de actualización aplicado para '{host_name}' en '{bng}'.")
-                        
                         final_state_response = client.get(path=[gnmi_path])
                         final_updates = final_state_response.get("notification", [{}])[0].get("update", [])
                         if final_updates and "val" in final_updates[0]:
@@ -240,7 +217,6 @@ async def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnati
                             return {"state": host_data.get("admin-state"), "plan": host_data.get("identification", {}).get("sla-profile-string"), "mac": host_data.get("host-identification", {}).get("mac")}
                         else:
                             raise Exception("No se pudo obtener el estado final del suscriptor.")
-
                     except Exception as e:
                         logger.warning(f"WARN: Intento {attempt + 1}/{max_total_retries} fallido para actualizar '{host_name}' en '{bng}': {repr(e)}")
                         if "Timeout" in repr(e) or "timeout" in repr(e):
@@ -249,7 +225,6 @@ async def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnati
                                 raise Exception(f"La operación falló por timeout después de {max_timeout_errors} intentos.")
                             time.sleep(1)
                             continue
-                        # Other error handling...
                         elif "reached maximum number of private sessions" in str(e):
                             _disconnect_netconf_sessions(bng)
                             time.sleep(1)
@@ -260,11 +235,9 @@ async def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnati
                         else:
                             raise e
                 raise Exception(f"No se pudo actualizar al suscriptor '{host_name}'.")
-
         return await asyncio.to_thread(task)
 
 def _execute_coa_with_retries(bng, subnatid, accountidbss, plan):
-    """Synchronous helper for CoA with its own retry logic."""
     device_config = DEVICES.get(bng)
     max_retries, retry_delay_seconds = 5, 3
     pysros_connection = None
@@ -292,7 +265,6 @@ def _execute_coa_with_retries(bng, subnatid, accountidbss, plan):
     finally:
         if pysros_connection: pysros_connection.disconnect()
 
-
 def _disconnect_netconf_sessions(bng: str):
     device_config = DEVICES.get(bng)
     net_connect = None
@@ -313,7 +285,50 @@ def _disconnect_netconf_sessions(bng: str):
             net_connect.disconnect()
             logger.info(f"Sesión de limpieza Netmiko desconectada de {bng}.")
 
-# El resto de las funciones públicas (dispatchers) no necesitan cambios
+# ===== ESTA ES LA FUNCIÓN ORIGINAL DE BULK UPDATE (SIN MODIFICACIONES INDEBIDAS) =====
+def _internal_bulk_update_state(bng: str, customers_to_update: dict, new_state: str):
+    device_config = DEVICES.get(bng)
+    gnmi_base_path = "/configure/subscriber-mgmt/local-user-db[name=LUDB-SIMPLE]/ipoe/host"
+    max_retries, retry_delay_seconds = 20, 3
+
+    update_payloads = []
+    for customer_id in customers_to_update:
+        gnmi_path = f"{gnmi_base_path}[host-name={customer_id}]"
+        payload = {"admin-state": new_state}
+        update_payloads.append((gnmi_path, payload))
+
+    if not update_payloads:
+        logger.info("No hay suscriptores para actualizar en este lote.")
+        return "No se realizaron cambios."
+
+    logger.info(f"Iniciando actualización masiva de estado para {len(update_payloads)} suscriptores en {bng}.")
+
+    with gNMIclient(target=(device_config["host"], device_config["gnmi_port"]), username=device_config["username"], password=device_config["password"], insecure=True, timeout=30) as client:
+        for attempt in range(max_retries):
+            try:
+                client.set(update=update_payloads)
+                logger.info(f"SUCCESS: Actualización masiva aplicada con éxito en '{bng}'.")
+                return f"Actualización masiva exitosa para {len(update_payloads)} suscriptores."
+            except Exception as e:
+                logger.warning(f"WARN: Intento {attempt + 1} de actualización masiva fallido en '{bng}': {e}")
+                if "reached maximum number of private sessions" in str(e):
+                    try:
+                        _disconnect_netconf_sessions(bng)
+                        time.sleep(retry_delay_seconds)
+                        continue
+                    except Exception as disconnect_e:
+                        logger.error(f"Error al intentar limpiar sesiones en {bng}: {disconnect_e}")
+                        
+                if ("Commit or validate is in progress" in str(e)) or ("Database write access is not available" in str(e)):
+                    time.sleep(retry_delay_seconds)
+                    continue
+                else:
+                    raise e
+        else:
+            raise Exception(f"No se pudo aplicar la configuración masiva en {bng} tras {max_retries} intentos.")
+
+# --- FUNCIONES PÚBLICAS (DISPATCHERS) ---
+
 async def get_all_subscribers_logic(bng: str, skip: int, limit: int):
     bng_list = CLUSTERS.get(bng, [bng])
     last_error = None
@@ -393,45 +408,84 @@ async def update_subscriber_logic(bng: str, accountidbss: str, subnatid: str, up
     return results
 
 async def bulk_update_subscriber_state_logic(bng: str, request_data: models.BulkUpdateStateRequest):
-    # This function is more complex and less frequently used, so we'll leave its retry logic as is for now
-    # to avoid introducing bugs, but we add the timeout to its gNMI call.
-    async with BNG_WRITE_LOCKS[bng]:
-        def task():
-            device_config = DEVICES.get(bng)
-            gnmi_base_path = "/configure/subscriber-mgmt/local-user-db[name=LUDB-SIMPLE]/ipoe/host"
-            max_retries, retry_delay_seconds = 5, 2
-            update_payloads = []
-            customers_to_update = {cid: {} for cid in request_data.customer_ids} # Simplified
-            for customer_id in customers_to_update:
-                gnmi_path = f"{gnmi_base_path}[host-name={customer_id}]"
-                payload = {"admin-state": request_data.state}
-                update_payloads.append((gnmi_path, payload))
-            if not update_payloads: return "No se realizaron cambios."
-            logger.info(f"Iniciando actualización masiva de estado para {len(update_payloads)} suscriptores en {bng}.")
-            with gNMIclient(target=(device_config["host"], device_config["gnmi_port"]), username=device_config["username"], password=device_config["password"], insecure=True, timeout=30) as client: # Longer timeout for bulk
-                for attempt in range(max_retries):
-                    try:
-                        client.set(update=update_payloads)
-                        logger.info(f"SUCCESS: Actualización masiva aplicada con éxito en '{bng}'.")
-                        return f"Actualización masiva exitosa para {len(update_payloads)} suscriptores."
-                    except Exception as e:
-                        logger.warning(f"WARN: Intento {attempt + 1} de actualización masiva fallido en '{bng}': {e}")
-                        if "reached maximum number of private sessions" in str(e):
-                            try:
-                                _disconnect_netconf_sessions(bng)
-                                time.sleep(retry_delay_seconds)
-                                continue
-                            except Exception as disconnect_e:
-                                logger.error(f"Error al intentar limpiar sesiones en {bng}: {disconnect_e}")
-
-                        elif ("Commit or validate is in progress" in str(e)) or ("Database write access is not available" in str(e)):
-                            time.sleep(retry_delay_seconds)
-                            continue
-                        else: raise e
-                raise Exception(f"No se pudo aplicar la configuración masiva en {bng} tras {max_retries} intentos.")
-    
-    # The dispatcher logic for bulk update remains complex; we are focusing on the core CRUD operations.
-    # A full implementation would require refactoring this dispatcher as well.
     bng_list = CLUSTERS.get(bng, [bng])
-    # ... existing logic ...
-    return await asyncio.to_thread(task)
+    primary_bng = bng_list[0]
+    updated_customers_report = []
+    not_found_customers = []
+    customers_to_process = {}
+
+    for customer_id in request_data.customer_ids:
+        try:
+            initial_state_data = await asyncio.to_thread(_internal_get_subscriber_by_name_logic, primary_bng, customer_id)
+            primary_pool = initial_state_data.get("ipv4", {}).get("address", {}).get("pool", {}).get("primary")
+            customers_to_process[customer_id] = {
+                "state_before": initial_state_data.get("admin-state"),
+                "subscriber_id": initial_state_data.get("identification", {}).get("subscriber-id"),
+                "interface": f"OLT-{primary_pool}" if primary_pool else None
+            }
+        except ValueError:
+            not_found_customers.append(customer_id)
+        except Exception as e:
+            updated_customers_report.append(models.CustomerState(
+                customer_id=customer_id, error=f"Error al obtener estado inicial: {e}"
+            ))
+
+    if request_data.state == "disable" and customers_to_process:
+        clear_tasks = [
+            asyncio.to_thread(_internal_clear_ipoe_sessions, bng_node, customers_to_process)
+            for bng_node in bng_list
+        ]
+        results = await asyncio.gather(*clear_tasks, return_exceptions=True)
+        failed_nodes = {bng_list[i]: str(res) for i, res in enumerate(results) if isinstance(res, Exception)}
+        if failed_nodes:
+            error_detail = ", ".join([f"{node}: {err}" for node, err in failed_nodes.items()])
+            for customer_id, data in customers_to_process.items():
+                updated_customers_report.append(models.CustomerState(
+                    customer_id=customer_id,
+                    state_before=data["state_before"],
+                    state_after=data["state_before"],
+                    error=f"Falló la limpieza de sesión: {error_detail}"
+                ))
+            return models.BulkUpdateStateResponse(
+                updated_customers=updated_customers_report,
+                not_found_customers=not_found_customers
+            )
+
+    if customers_to_process:
+        # Aquí se usa un `to_thread` porque `_internal_bulk_update_state` es síncrona.
+        update_tasks = [
+            asyncio.to_thread(_internal_bulk_update_state, bng_node, customers_to_process, request_data.state)
+            for bng_node in bng_list
+        ]
+        update_results = await asyncio.gather(*update_tasks, return_exceptions=True)
+        failed_nodes = {bng_list[i]: str(res) for i, res in enumerate(update_results) if isinstance(res, Exception)}
+
+        if failed_nodes:
+            error_detail = ", ".join([f"{node}: {err}" for node, err in failed_nodes.items()])
+            for customer_id, data in customers_to_process.items():
+                updated_customers_report.append(models.CustomerState(
+                    customer_id=customer_id,
+                    state_before=data["state_before"],
+                    state_after=data["state_before"],
+                    error=f"Falló la actualización de estado: {error_detail}"
+                ))
+        else:
+            for customer_id, data in customers_to_process.items():
+                try:
+                    final_state_data = await asyncio.to_thread(_internal_get_subscriber_by_name_logic, primary_bng, customer_id)
+                    updated_customers_report.append(models.CustomerState(
+                        customer_id=customer_id,
+                        state_before=data["state_before"],
+                        state_after=final_state_data.get("admin-state")
+                    ))
+                except Exception as e:
+                    updated_customers_report.append(models.CustomerState(
+                        customer_id=customer_id,
+                        state_before=data["state_before"],
+                        error=f"Error al obtener estado final: {e}"
+                    ))
+
+    return models.BulkUpdateStateResponse(
+        updated_customers=updated_customers_report,
+        not_found_customers=not_found_customers
+    )
