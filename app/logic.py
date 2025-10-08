@@ -460,20 +460,57 @@ async def delete_subscriber_logic(bng: str, accountidbss: str, subnatid: str, ol
 async def update_subscriber_logic(bng: str, accountidbss: str, subnatid: str, update_data: models.UpdateSubscriber):
     bng_list = CLUSTERS.get(bng, [bng])
     primary_bng = bng_list[0]
+    
+    # --- 1. LÓGICA DE ACTUALIZACIÓN NORMAL ---
     results = await _run_write_tasks_in_parallel(_internal_update_subscriber_logic, bng_list, accountidbss, subnatid, update_data)
+
     if results["failed_nodes"]:
         return results
+
     logger.info(f"INFO: Actualización exitosa en todos los nodos: {list(results['successful_nodes'].keys())}. Obteniendo estado final de '{primary_bng}'.")
     final_state = await asyncio.to_thread(_internal_get_subscriber_by_name_logic, primary_bng, accountidbss)
+    
     mapped_response = {
         "state": final_state.get("admin-state"),
         "plan": final_state.get("identification", {}).get("sla-profile-string"),
         "mac": final_state.get("host-identification", {}).get("mac"),
     }
     results["data"] = mapped_response
+
+    # --- 2. LÓGICA DE LIMPIEZA DE SESIÓN (DESPUÉS DE ACTUALIZAR) ---
+    if update_data.state == "disable":
+        logger.info(f"INFO: El suscriptor '{accountidbss}' fue deshabilitado. Procediendo a limpiar la sesión IPoE.")
+        try:
+            # Reutilizamos los datos que ya obtuvimos del estado final para construir el comando
+            primary_pool = final_state.get("ipv4", {}).get("address", {}).get("pool", {}).get("primary")
+            
+            customer_to_clear = {
+                accountidbss: {
+                    "subscriber_id": final_state.get("identification", {}).get("subscriber-id"),
+                    "interface": f"OLT-{primary_pool}" if primary_pool else None
+                }
+            }
+
+            # Ejecutamos la limpieza de sesión en paralelo
+            clear_results = await _run_write_tasks_in_parallel(
+                _internal_clear_ipoe_sessions,
+                bng_list,
+                customer_to_clear
+            )
+
+            if clear_results["failed_nodes"]:
+                # Si la limpieza falla, no sobreescribimos el resultado exitoso. Añadimos una advertencia.
+                warning_message = f"El estado del suscriptor fue actualizado a 'disable', pero la limpieza de sesión IPoE falló: {clear_results['failed_nodes']}"
+                logger.error(warning_message)
+                results['warning'] = warning_message
+
+        except Exception as e:
+            error_message = f"El estado del suscriptor fue actualizado a 'disable', pero ocurrió un error crítico al intentar limpiar la sesión IPoE: {repr(e)}"
+            logger.error(f"ERROR: {error_message}")
+            results['warning'] = error_message
+            
     return results
 
-# ===== ESTA ES LA FUNCIÓN DISPATCHER ORIGINAL PARA BULK UPDATE (SIN MODIFICACIONES) =====
 async def bulk_update_subscriber_state_logic(bng: str, request_data: models.BulkUpdateStateRequest):
     bng_list = CLUSTERS.get(bng, [bng])
     primary_bng = bng_list[0]
