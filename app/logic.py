@@ -323,12 +323,16 @@ def _internal_clear_ipoe_sessions(bng: str, customers_to_clear: dict):
                     try:
                         _disconnect_netconf_sessions(bng)
                         time.sleep(retry_delay_seconds)
+                        if pysros_connection:
+                            pysros_connection.disconnect()
                         continue
                     except Exception as disconnect_e:
                         logger.error(f"Error al intentar limpiar sesiones en {bng}: {disconnect_e}")
 
                 if ("Commit or validate is in progress" in str(e)) or ("Database write access is not available" in str(e)):
                     time.sleep(retry_delay_seconds)
+                    if pysros_connection:
+                        pysros_connection.disconnect()
                 else:
                     raise e
         else:
