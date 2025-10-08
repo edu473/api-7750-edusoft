@@ -118,14 +118,14 @@ async def _internal_create_subscriber_logic(bng: str, subscriber_data: models.Su
                         timeout_error_count += 1
                         if timeout_error_count >= max_timeout_errors:
                             raise Exception(f"La operación falló por timeout después de {max_timeout_errors} intentos.")
-                        time.sleep(2)
+                        time.sleep(3)
                         continue
                     elif "reached maximum number of private sessions" in str(e):
                         _disconnect_netconf_sessions(bng)
                         time.sleep(1)
                         continue
                     elif "Commit or validate is in progress" in str(e) or "Database write access is not available" in str(e):
-                        time.sleep(2)
+                        time.sleep(3)
                         continue
                     else:
                         raise e
@@ -164,14 +164,14 @@ async def _internal_delete_subscriber_logic(bng: str, accountidbss: str, subnati
                         timeout_error_count += 1
                         if timeout_error_count >= max_timeout_errors:
                             raise Exception(f"La operación falló por timeout después de {max_timeout_errors} intentos.")
-                        time.sleep(2)
+                        time.sleep(3)
                         continue
                     elif "reached maximum number of private sessions" in str(e):
                         _disconnect_netconf_sessions(bng)
                         time.sleep(1)
                         continue
                     elif "Commit or validate is in progress" in str(e) or "Database write access is not available" in str(e):
-                        time.sleep(2)
+                        time.sleep(3)
                         continue
                     else:
                         raise e
@@ -223,14 +223,14 @@ async def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnati
                             timeout_error_count += 1
                             if timeout_error_count >= max_timeout_errors:
                                 raise Exception(f"La operación falló por timeout después de {max_timeout_errors} intentos.")
-                            time.sleep(2)
+                            time.sleep(3)
                             continue
                         elif "reached maximum number of private sessions" in str(e):
                             _disconnect_netconf_sessions(bng)
                             time.sleep(1)
                             continue
                         elif "Commit or validate is in progress" in str(e) or "Database write access is not available" in str(e):
-                            time.sleep(2)
+                            time.sleep(3)
                             continue
                         else:
                             raise e
