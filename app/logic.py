@@ -481,8 +481,6 @@ async def update_subscriber_logic(bng: str, accountidbss: str, subnatid: str, up
     if update_data.state == "disable":
         logger.info(f"INFO: El suscriptor '{accountidbss}' fue deshabilitado. Procediendo a limpiar la sesión IPoE.")
         try:
-            # Reutilizamos los datos que ya obtuvimos del estado final para construir el comando
-            primary_pool = final_state.get("ipv4", {}).get("address", {}).get("pool", {}).get("primary")
             
             customer_to_clear = {
                 accountidbss: {
