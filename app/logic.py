@@ -285,6 +285,63 @@ def _disconnect_netconf_sessions(bng: str):
             net_connect.disconnect()
             logger.info(f"Sesión de limpieza Netmiko desconectada de {bng}.")
 
+def _internal_clear_ipoe_sessions(bng: str, customers_to_clear: dict):
+    device_config = DEVICES.get(bng)
+    max_retries, retry_delay_seconds = 20, 3
+    pysros_connection = None
+
+    if not customers_to_clear:
+        logger.info(f"No hay sesiones de suscriptor para limpiar en {bng}.")
+        return "No se requirió limpieza de sesión."
+    
+    logger.info(f"Iniciando limpieza de sesión para {len(customers_to_clear)} suscriptores en {bng}.")
+
+    try:
+        for attempt in range(max_retries):
+            try:
+                pysros_connection = pysros_connect(
+                    host=device_config["host"], 
+                    username=device_config["username"], 
+                    password=device_config["password"], 
+                    port=device_config.get("netconf_port", 830), 
+                    hostkey_verify=False
+                )
+                break
+            except SrosMgmtError as e:
+                logger.warning(f"WARN: Intento {attempt + 1} de conexión pysros fallido en '{bng}': {e}")
+                if "reached maximum number of private sessions" in str(e):
+                    try:
+                        _disconnect_netconf_sessions(bng)
+                        time.sleep(retry_delay_seconds)
+                        continue
+                    except Exception as disconnect_e:
+                        logger.error(f"Error al intentar limpiar sesiones en {bng}: {disconnect_e}")
+
+                if ("Commit or validate is in progress" in str(e)) or ("Database write access is not available" in str(e)):
+                    time.sleep(retry_delay_seconds)
+                else:
+                    raise e
+        else:
+            raise SrosMgmtError(f"No se pudo conectar con pysros a {bng} por bloqueo persistente.")
+        
+        for customer_id, data in customers_to_clear.items():
+            subscriber_id = data.get("subscriber_id")
+            interface = data.get("interface")
+            
+            if subscriber_id and interface:
+                command = f'clear service id "100" ipoe session subscriber "{subscriber_id}" interface "SUBSCRIBER-INTERFACE-1"'
+                logger.info(f"Ejecutando en {bng}: {command}")
+                pysros_connection.cli(command)
+            else:
+                logger.warning(f"No se pudo construir comando para {customer_id} en {bng} por falta de datos.")
+
+        logger.info(f"SUCCESS: Comandos de limpieza de sesión ejecutados en '{bng}'.")
+        return f"Limpieza de sesión exitosa para {len(customers_to_clear)} suscriptores."
+
+    finally:
+        if pysros_connection:
+            pysros_connection.disconnect()
+
 # ===== ESTA ES LA FUNCIÓN ORIGINAL DE BULK UPDATE (SIN MODIFICACIONES) =====
 def _internal_bulk_update_state(bng: str, customers_to_update: dict, new_state: str):
     device_config = DEVICES.get(bng)
