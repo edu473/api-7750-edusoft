@@ -446,7 +446,7 @@ async def _run_write_tasks_in_parallel(worker_func, bng_list, *args):
     
     for bng_node, res in zip(bng_list, results):
         if isinstance(res, Exception):
-            failed_nodes[bng_node] = str(res)
+            failed_nodes[bng_node] = repr(res)
             logger.error(f"ERROR: La operación falló en el nodo '{bng_node}': {res}")
         else:
             successful_nodes[bng_node] = res
