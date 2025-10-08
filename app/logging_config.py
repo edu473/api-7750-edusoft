@@ -44,7 +44,7 @@ LOGGING_CONFIG = {
 
         "pygnmi": {
             "handlers": ["default"],
-            "level": "INFO",
+            "level": "WARNING",
             "propagate": False,
         },
 
