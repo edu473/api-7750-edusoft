@@ -88,7 +88,7 @@ async def _internal_create_subscriber_logic(bng: str, subscriber_data: models.Su
     async with BNG_WRITE_LOCKS[bng]:
         def task():
             host_name = subscriber_data.accountidbss
-            max_total_retries = 6
+            max_total_retries = 20
             timeout_error_count = 0
             max_timeout_errors = 3
             for attempt in range(max_total_retries):
@@ -118,7 +118,7 @@ async def _internal_create_subscriber_logic(bng: str, subscriber_data: models.Su
                         timeout_error_count += 1
                         if timeout_error_count >= max_timeout_errors:
                             raise Exception(f"La operación falló por timeout después de {max_timeout_errors} intentos.")
-                        time.sleep(1)
+                        time.sleep(2)
                         continue
                     elif "reached maximum number of private sessions" in str(e):
                         _disconnect_netconf_sessions(bng)
@@ -136,7 +136,7 @@ async def _internal_delete_subscriber_logic(bng: str, accountidbss: str, subnati
     async with BNG_WRITE_LOCKS[bng]:
         def task():
             host_name = accountidbss
-            max_total_retries = 6
+            max_total_retries = 20
             timeout_error_count = 0
             max_timeout_errors = 3
             for attempt in range(max_total_retries):
@@ -164,7 +164,7 @@ async def _internal_delete_subscriber_logic(bng: str, accountidbss: str, subnati
                         timeout_error_count += 1
                         if timeout_error_count >= max_timeout_errors:
                             raise Exception(f"La operación falló por timeout después de {max_timeout_errors} intentos.")
-                        time.sleep(1)
+                        time.sleep(2)
                         continue
                     elif "reached maximum number of private sessions" in str(e):
                         _disconnect_netconf_sessions(bng)
@@ -203,7 +203,7 @@ async def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnati
                     host_data = updates[0]["val"]
                     return {"state": host_data.get("admin-state"), "plan": host_data.get("identification", {}).get("sla-profile-string"), "mac": host_data.get("host-identification", {}).get("mac")}
                 logger.info(f"DEBUG: Payload de actualización para '{host_name}': {payload}")
-                max_total_retries = 6
+                max_total_retries = 20
                 timeout_error_count = 0
                 max_timeout_errors = 3
                 for attempt in range(max_total_retries):
@@ -223,7 +223,7 @@ async def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnati
                             timeout_error_count += 1
                             if timeout_error_count >= max_timeout_errors:
                                 raise Exception(f"La operación falló por timeout después de {max_timeout_errors} intentos.")
-                            time.sleep(1)
+                            time.sleep(2)
                             continue
                         elif "reached maximum number of private sessions" in str(e):
                             _disconnect_netconf_sessions(bng)
@@ -285,7 +285,7 @@ def _disconnect_netconf_sessions(bng: str):
             net_connect.disconnect()
             logger.info(f"Sesión de limpieza Netmiko desconectada de {bng}.")
 
-# ===== ESTA ES LA FUNCIÓN ORIGINAL DE BULK UPDATE (SIN MODIFICACIONES INDEBIDAS) =====
+# ===== ESTA ES LA FUNCIÓN ORIGINAL DE BULK UPDATE (SIN MODIFICACIONES) =====
 def _internal_bulk_update_state(bng: str, customers_to_update: dict, new_state: str):
     device_config = DEVICES.get(bng)
     gnmi_base_path = "/configure/subscriber-mgmt/local-user-db[name=LUDB-SIMPLE]/ipoe/host"
@@ -321,7 +321,6 @@ def _internal_bulk_update_state(bng: str, customers_to_update: dict, new_state: 
                         
                 if ("Commit or validate is in progress" in str(e)) or ("Database write access is not available" in str(e)):
                     time.sleep(retry_delay_seconds)
-                    continue
                 else:
                     raise e
         else:
@@ -407,6 +406,7 @@ async def update_subscriber_logic(bng: str, accountidbss: str, subnatid: str, up
     results["data"] = mapped_response
     return results
 
+# ===== ESTA ES LA FUNCIÓN DISPATCHER ORIGINAL PARA BULK UPDATE (SIN MODIFICACIONES) =====
 async def bulk_update_subscriber_state_logic(bng: str, request_data: models.BulkUpdateStateRequest):
     bng_list = CLUSTERS.get(bng, [bng])
     primary_bng = bng_list[0]
@@ -452,7 +452,6 @@ async def bulk_update_subscriber_state_logic(bng: str, request_data: models.Bulk
             )
 
     if customers_to_process:
-        # Aquí se usa un `to_thread` porque `_internal_bulk_update_state` es síncrona.
         update_tasks = [
             asyncio.to_thread(_internal_bulk_update_state, bng_node, customers_to_process, request_data.state)
             for bng_node in bng_list
