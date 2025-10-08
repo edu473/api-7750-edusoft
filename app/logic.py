@@ -90,7 +90,7 @@ async def _internal_create_subscriber_logic(bng: str, subscriber_data: models.Su
             host_name = subscriber_data.accountidbss
             max_total_retries = 20
             timeout_error_count = 0
-            max_timeout_errors = 3
+            max_timeout_errors = 20
             for attempt in range(max_total_retries):
                 try:
                     device_config = DEVICES.get(bng)
@@ -138,7 +138,7 @@ async def _internal_delete_subscriber_logic(bng: str, accountidbss: str, subnati
             host_name = accountidbss
             max_total_retries = 20
             timeout_error_count = 0
-            max_timeout_errors = 3
+            max_timeout_errors = 20
             for attempt in range(max_total_retries):
                 try:
                     device_config = DEVICES.get(bng)
@@ -205,7 +205,7 @@ async def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnati
                 logger.info(f"DEBUG: Payload de actualización para '{host_name}': {payload}")
                 max_total_retries = 20
                 timeout_error_count = 0
-                max_timeout_errors = 3
+                max_timeout_errors = 20
                 for attempt in range(max_total_retries):
                     try:
                         client.set(update=[(gnmi_path, payload)])
