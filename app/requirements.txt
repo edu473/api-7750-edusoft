@@ -5,3 +5,7 @@ pygnmi
 pysros
 dotenv
 netmiko
+
+
+grpcio==1.62.2
+grpcio-tools==1.62.2
