@@ -430,26 +430,6 @@ async def bulk_update_subscriber_state_logic(bng: str, request_data: models.Bulk
                 customer_id=customer_id, error=f"Error al obtener estado inicial: {e}"
             ))
 
-    if request_data.state == "disable" and customers_to_process:
-        clear_tasks = [
-            asyncio.to_thread(_internal_clear_ipoe_sessions, bng_node, customers_to_process)
-            for bng_node in bng_list
-        ]
-        results = await asyncio.gather(*clear_tasks, return_exceptions=True)
-        failed_nodes = {bng_list[i]: str(res) for i, res in enumerate(results) if isinstance(res, Exception)}
-        if failed_nodes:
-            error_detail = ", ".join([f"{node}: {err}" for node, err in failed_nodes.items()])
-            for customer_id, data in customers_to_process.items():
-                updated_customers_report.append(models.CustomerState(
-                    customer_id=customer_id,
-                    state_before=data["state_before"],
-                    state_after=data["state_before"],
-                    error=f"Falló la limpieza de sesión: {error_detail}"
-                ))
-            return models.BulkUpdateStateResponse(
-                updated_customers=updated_customers_report,
-                not_found_customers=not_found_customers
-            )
 
     if customers_to_process:
         update_tasks = [
@@ -483,6 +463,27 @@ async def bulk_update_subscriber_state_logic(bng: str, request_data: models.Bulk
                         state_before=data["state_before"],
                         error=f"Error al obtener estado final: {e}"
                     ))
+
+    if request_data.state == "disable" and customers_to_process:
+        clear_tasks = [
+            asyncio.to_thread(_internal_clear_ipoe_sessions, bng_node, customers_to_process)
+            for bng_node in bng_list
+        ]
+        results = await asyncio.gather(*clear_tasks, return_exceptions=True)
+        failed_nodes = {bng_list[i]: str(res) for i, res in enumerate(results) if isinstance(res, Exception)}
+        if failed_nodes:
+            error_detail = ", ".join([f"{node}: {err}" for node, err in failed_nodes.items()])
+            for customer_id, data in customers_to_process.items():
+                updated_customers_report.append(models.CustomerState(
+                    customer_id=customer_id,
+                    state_before=data["state_before"],
+                    state_after=data["state_before"],
+                    error=f"Falló la limpieza de sesión: {error_detail}"
+                ))
+            return models.BulkUpdateStateResponse(
+                updated_customers=updated_customers_report,
+                not_found_customers=not_found_customers
+            )
 
     return models.BulkUpdateStateResponse(
         updated_customers=updated_customers_report,
