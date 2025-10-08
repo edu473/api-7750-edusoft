@@ -336,9 +336,8 @@ def _internal_clear_ipoe_sessions(bng: str, customers_to_clear: dict):
         
         for customer_id, data in customers_to_clear.items():
             subscriber_id = data.get("subscriber_id")
-            interface = data.get("interface")
             
-            if subscriber_id and interface:
+            if subscriber_id:
                 command = f'clear service id "100" ipoe session subscriber "{subscriber_id}" interface "SUBSCRIBER-INTERFACE-1"'
                 logger.info(f"Ejecutando en {bng}: {command}")
                 pysros_connection.cli(command)
@@ -484,21 +483,27 @@ async def update_subscriber_logic(bng: str, accountidbss: str, subnatid: str, up
             
             customer_to_clear = {
                 accountidbss: {
-                    "subscriber_id": final_state.get("identification", {}).get("subscriber-id"),
-                    "interface": f"OLT-{primary_pool}" if primary_pool else None
+                    "subscriber_id": final_state.get("identification", {}).get("subscriber-id")
                 }
             }
 
             # Ejecutamos la limpieza de sesión en paralelo
-            clear_results = await _run_write_tasks_in_parallel(
-                _internal_clear_ipoe_sessions,
-                bng_list,
-                customer_to_clear
-            )
+            clear_tasks = [
+                asyncio.to_thread(_internal_clear_ipoe_sessions, bng_node, customer_to_clear)
+                for bng_node in bng_list
+            ]
 
-            if clear_results["failed_nodes"]:
-                # Si la limpieza falla, no sobreescribimos el resultado exitoso. Añadimos una advertencia.
-                warning_message = f"El estado del suscriptor fue actualizado a 'disable', pero la limpieza de sesión IPoE falló: {clear_results['failed_nodes']}"
+            clear_results_list = await asyncio.gather(*clear_tasks, return_exceptions=True)
+            
+            failed_nodes = {}
+            for i, res in enumerate(clear_results_list):
+                if isinstance(res, Exception):
+                    bng_node = bng_list[i]
+                    failed_nodes[bng_node] = repr(res)
+                    logger.error(f"ERROR: Fallo en la limpieza de sesión en el nodo '{bng_node}': {repr(res)}")
+
+            if failed_nodes:
+                warning_message = f"El estado del suscriptor fue actualizado a 'disable', pero la limpieza de sesión IPoE falló: {failed_nodes}"
                 logger.error(warning_message)
                 results['warning'] = warning_message
 
