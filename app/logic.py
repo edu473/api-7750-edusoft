@@ -348,7 +348,7 @@ async def _internal_bulk_update_and_clear_logic(bng: str, customers_to_update: d
     try:
         # Ahora espera el bloqueo para ejecutar la operación de forma secuencial
         async with BNG_WRITE_LOCKS[bng]:
-            async with pysros_connection(bng, timeout=300) as conn:
+            async with pysros_connection(bng) as conn:
                 lock_acquired = False
                 try:
                     
