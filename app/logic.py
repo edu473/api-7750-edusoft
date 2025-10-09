@@ -120,7 +120,7 @@ async def _single_warmup(bng: str):
         pass
 
 async def _execute_with_retry(func, *args, **kwargs):
-    max_retries = 10
+    max_retries = 20
     retry_delay_seconds = 3
     operation_timeout = 60.0
     for attempt in range(max_retries):
