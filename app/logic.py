@@ -299,10 +299,31 @@ async def _internal_bulk_update_and_clear_logic(bng: str, customers_to_update: d
 
     async with BNG_WRITE_LOCKS[bng]:
         async with pysros_connection(bng, timeout=300) as conn:
+            lock_acquired = False
             try:
-                logger.info(f"Adquiriendo bloqueo de configuración en {bng}...")
-                await asyncio.to_thread(conn.candidate.lock)
-                logger.info(f"Bloqueo adquirido exitosamente en {bng}.")
+                
+                max_lock_retries = 10
+                retry_delay_seconds = 5
+
+                for attempt in range(max_lock_retries):
+                    try:
+                        logger.info(f"Adquiriendo bloqueo de configuración en {bng} (Intento {attempt + 1}/{max_lock_retries})...")
+                        await asyncio.to_thread(conn.candidate.lock)
+                        lock_acquired = True
+                        logger.info(f"Bloqueo adquirido exitosamente en {bng}.")
+                        break  # Salimos del bucle si el lock se adquiere con éxito
+                    except SrosMgmtError as e:
+                        # Comprobamos si el error es porque el lock ya está en uso
+                        error_str = str(e).lower()
+                        if "lock is already held" in error_str or "does not hold the lock" in error_str:
+                            logger.warning(f"No se pudo adquirir el lock, ya está en uso. Reintentando en {retry_delay_seconds}s...")
+                            await asyncio.sleep(retry_delay_seconds)
+                        else:
+                            raise  # Si es otro tipo de error, lo relanzamos
+                
+                if not lock_acquired:
+                    raise SrosMgmtError(f"No se pudo adquirir el lock de configuración en {bng} después de {max_lock_retries} intentos.")
+
 
                 logger.info(f"Construyendo payload para actualización masiva de {len(customers_to_update)} suscriptores en {bng}.")
 
