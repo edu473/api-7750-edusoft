@@ -282,41 +282,56 @@ async def _internal_bulk_update_and_clear_logic(bng: str, customers_to_update: d
     async with BNG_WRITE_LOCKS[bng]:
         async with pysros_connection(bng) as conn:
             logger.info(f"Iniciando actualización masiva para {len(customers_to_update)} suscriptores en {bng}.")
+
+            # --- CONSTRUCCIÓN DEL PAYLOAD PARA UN 'SET' ÚNICO Y EFICIENTE ---
+
+            # 1. Creamos una lista de diccionarios. Cada diccionario representa un
+            #    elemento de la lista "host" que queremos modificar.
+            hosts_payload = [
+                {
+                    # "host-name" es la CLAVE que el router usa para encontrar al suscriptor en la lista.
+                    "host-name": customer_id,
+                    # "admin-state" es el VALOR que queremos cambiar para ese suscriptor.
+                    "admin-state": new_state
+                }
+                for customer_id in customers_to_update
+            ]
+
+            # 2. Creamos el diccionario final. La clave "host" le dice a pysros que
+            #    estamos modificando la lista llamada "host". El valor es la lista de cambios.
+            bulk_update_payload = {
+                "host": hosts_payload
+            }
             
-            for customer_id in customers_to_update:
-                path = f'/configure/subscriber-mgmt/local-user-db[name="LUDB-SIMPLE"]/ipoe/host[host-name="{customer_id}"]/admin-state'
-                await _execute_with_retry(conn.candidate.set, path, new_state)
+            # 3. El path apunta al CONTENEDOR PADRE de la lista "host".
+            path = '/configure/subscriber-mgmt/local-user-db[name="LUDB-SIMPLE"]/ipoe'
+
+            # 4. Ejecutamos UNA SOLA LLAMADA a .set() con el payload masivo.
+            #    Esto se traduce en una única y eficiente operación NETCONF.
+            await _execute_with_retry(conn.candidate.set, path, bulk_update_payload)
             
+            # 5. Confirmamos todos los cambios a la vez en una sola transacción.
             await _execute_with_retry(conn.candidate.commit)
             logger.info(f"SUCCESS: Actualización masiva de estado aplicada en '{bng}'.")
 
+            # --- La lógica de limpieza masiva eficiente se mantiene sin cambios ---
             if new_state == "disable":
                 logger.info(f"Procediendo a limpiar {len(customers_to_update)} sesiones en {bng} con un solo comando.")
                 
-                # 1. Construir la lista de comandos
                 clear_commands_list = [
                     f'clear service id "100" ipoe session subscriber "{data["subscriber_id"]}" interface "SUBSCRIBER-INTERFACE-1"'
                     for data in customers_to_update.values() if data.get("subscriber_id")
                 ]
 
-                if not clear_commands_list:
-                    logger.warning("No hay subscriber-ids válidos para limpiar.")
-                    return "Actualización de estado completada, pero no se limpiaron sesiones."
-
-                # 2. Unir todos los comandos en un solo string, separados por saltos de línea
-                bulk_clear_command = "\n".join(clear_commands_list)
-                
-                try:
-                    # 3. Enviar el bloque completo de comandos en UNA SOLA LLAMADA
-                    logger.info(f"Enviando bloque de {len(clear_commands_list)} comandos clear...")
-                    await _execute_with_retry(conn.cli, bulk_clear_command)
-                    logger.info(f"SUCCESS: Bloque de comandos clear ejecutado en '{bng}'.")
-                
-                except SrosMgmtError as e:
-                    # Si el bloque completo falla, se registra el error.
-                    logger.error(f"ERROR: Falló la ejecución del bloque de limpieza de sesiones en '{bng}': {e}")
-                    # Es importante relanzar la excepción para que el dispatcher la capture
-                    raise Exception(f"Falló la ejecución del bloque de limpieza de sesiones: {e}")
+                if clear_commands_list:
+                    bulk_clear_command = "\n".join(clear_commands_list)
+                    try:
+                        logger.info(f"Enviando bloque de {len(clear_commands_list)} comandos clear...")
+                        await _execute_with_retry(conn.cli, bulk_clear_command)
+                        logger.info(f"SUCCESS: Bloque de comandos clear ejecutado en '{bng}'.")
+                    except SrosMgmtError as e:
+                        logger.error(f"ERROR: Falló la ejecución del bloque de limpieza: {e}")
+                        raise Exception(f"Falló la ejecución del bloque de limpieza: {e}")
 
     return f"Operación masiva completada exitosamente en {bng}."
 
