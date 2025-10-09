@@ -4,6 +4,7 @@ from typing import List, Any
 
 from .. import models
 from .. import logic
+from ..logic import QueueFullError
 
 # APIRouter nos permite agrupar rutas y luego incluirlas en la app principal.
 router = APIRouter(
@@ -35,6 +36,8 @@ async def create_subscriber(
                 detail={"message": "La operación de creación falló en uno o más nodos.", **result}
             )
         return result.get("data")
+    except QueueFullError as e:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(e))
     except HTTPException as http_exc:
         raise http_exc # Re-lanza la excepción HTTP para que FastAPI la maneje
     except Exception as e:
@@ -70,6 +73,8 @@ async def delete_subscriber(
             )
         # Si todos tienen éxito, se devuelve 204 No Content
         return
+    except QueueFullError as e:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(e))
     except HTTPException as http_exc:
         raise http_exc
     except Exception as e:
@@ -93,6 +98,8 @@ async def update_subscriber(
                 detail={"message": "La operación de actualización falló en uno o más nodos.", **result}
             )
         return result.get("data")
+    except QueueFullError as e:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(e))
     except HTTPException as http_exc:
         raise http_exc
     except Exception as e:
@@ -108,5 +115,7 @@ async def bulk_update_state(
     try:
         result = await logic.bulk_update_subscriber_state_logic(bng=bng, request_data=request_data)
         return result
+    except QueueFullError as e:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))

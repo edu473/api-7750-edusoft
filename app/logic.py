@@ -1,7 +1,7 @@
 # app/logic.py
 import time
 import asyncio
-from asyncio import TimeoutError as FutureTimeoutError
+from asyncio import TimeoutError as FutureTimeoutError, BoundedSemaphore
 import os
 from dotenv import load_dotenv
 from pysros.management import connect as pysros_connect
@@ -45,6 +45,10 @@ CLUSTERS = {
 
 # --- GESTIÓN DE CONCURRENCIA ---
 BNG_WRITE_LOCKS = {bng: asyncio.Lock() for bng in DEVICES}
+BNG_QUEUE_SEMAPHORES = {bng: BoundedSemaphore(5) for bng in DEVICES}
+
+class QueueFullError(Exception):
+    pass
 
 # --- GESTOR DE CONEXIONES PYSROS ---
 @asynccontextmanager
@@ -185,6 +189,14 @@ def _internal_get_subscriber_by_name_logic(bng: str, accountidbss: str):
 # --- FUNCIONES DE ESCRITURA (MODIFICADAS PARA USAR EL HELPER DE REINTENTOS) ---
 
 async def _internal_create_subscriber_logic(bng: str, subscriber_data: models.Subscriber):
+    semaphore = BNG_QUEUE_SEMAPHORES.get(bng)
+    try:
+        # Intenta adquirir un espacio en la cola sin esperar
+        await asyncio.wait_for(semaphore.acquire(), timeout=0.01)
+    except asyncio.TimeoutError:
+        # Si falla, la cola está llena
+        raise QueueFullError("Servidor ocupado, la cola de operaciones está llena.")
+
     host_name = subscriber_data.accountidbss
     try:
         await asyncio.to_thread(_internal_get_subscriber_by_name_logic, bng, host_name)
@@ -202,17 +214,29 @@ async def _internal_create_subscriber_logic(bng: str, subscriber_data: models.Su
         "ipv4": {"address": {"pool": {"primary": subscriber_data.olt}}},
         "ipv6": {"address-pool": subscriber_data.olt, "delegated-prefix-pool": subscriber_data.olt}
     }
-    
-    async with BNG_WRITE_LOCKS[bng]:
-        async with pysros_connection(bng) as conn:
-            logger.info(f"Creando suscriptor '{host_name}' en BNG '{bng}'...")
-            await _execute_with_retry(conn.candidate.set, path, payload)
-            await _execute_with_retry(conn.candidate.commit)
-            logger.info(f"SUCCESS: Suscriptor '{host_name}' creado exitosamente en '{bng}'.")
-            return f"Suscriptor '{host_name}' creado exitosamente."
+
+    try:
+        # Ahora espera el bloqueo para ejecutar la operación de forma secuencial
+        async with BNG_WRITE_LOCKS[bng]:
+            async with pysros_connection(bng) as conn:
+                logger.info(f"Creando suscriptor '{host_name}' en BNG '{bng}'...")
+                await _execute_with_retry(conn.candidate.set, path, payload)
+                await _execute_with_retry(conn.candidate.commit)
+                logger.info(f"SUCCESS: Suscriptor '{host_name}' creado exitosamente en '{bng}'.")
+                return f"Suscriptor '{host_name}' creado exitosamente."
+    finally:
+        semaphore.release()
 
 
 async def _internal_delete_subscriber_logic(bng: str, accountidbss: str, subnatid: str, olt: str):
+    semaphore = BNG_QUEUE_SEMAPHORES.get(bng)
+    try:
+        # Intenta adquirir un espacio en la cola sin esperar
+        await asyncio.wait_for(semaphore.acquire(), timeout=0.01)
+    except asyncio.TimeoutError:
+        # Si falla, la cola está llena
+        raise QueueFullError("Servidor ocupado, la cola de operaciones está llena.")
+
     host_name = accountidbss
     try:
         host_data = await asyncio.to_thread(_internal_get_subscriber_by_name_logic, bng, host_name)
@@ -226,16 +250,29 @@ async def _internal_delete_subscriber_logic(bng: str, accountidbss: str, subnati
 
     path = f'/configure/subscriber-mgmt/local-user-db[name="LUDB-SIMPLE"]/ipoe/host[host-name="{host_name}"]'
 
-    async with BNG_WRITE_LOCKS[bng]:
-        async with pysros_connection(bng) as conn:
-            logger.info(f"Eliminando suscriptor '{host_name}' de BNG '{bng}'...")
-            await _execute_with_retry(conn.candidate.delete, path)
-            await _execute_with_retry(conn.candidate.commit)
-            logger.info(f"SUCCESS: Suscriptor '{host_name}' eliminado con éxito de '{bng}'.")
-            return f"Suscriptor '{host_name}' eliminado exitosamente."
+    try:
+        async with BNG_WRITE_LOCKS[bng]:
+            async with pysros_connection(bng) as conn:
+                logger.info(f"Eliminando suscriptor '{host_name}' de BNG '{bng}'...")
+                await _execute_with_retry(conn.candidate.delete, path)
+                await _execute_with_retry(conn.candidate.commit)
+                logger.info(f"SUCCESS: Suscriptor '{host_name}' eliminado con éxito de '{bng}'.")
+                return f"Suscriptor '{host_name}' eliminado exitosamente."
+
+    finally:
+        semaphore.release()
+
 
 
 async def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnatid: str, update_data: models.UpdateSubscriber):
+    semaphore = BNG_QUEUE_SEMAPHORES.get(bng)
+    try:
+        # Intenta adquirir un espacio en la cola sin esperar
+        await asyncio.wait_for(semaphore.acquire(), timeout=0.01)
+    except asyncio.TimeoutError:
+        # Si falla, la cola está llena
+        raise QueueFullError("Servidor ocupado, la cola de operaciones está llena.")
+
     host_name = accountidbss
     # Primero, verificamos que el suscriptor exista. Esto no cambia.
     await asyncio.to_thread(_internal_get_subscriber_by_name_logic, bng, host_name)
@@ -243,127 +280,144 @@ async def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnati
     # La ruta base al host del suscriptor. Esto no cambia.
     base_path = f'/configure/subscriber-mgmt/local-user-db[name="LUDB-SIMPLE"]/ipoe/host[host-name="{host_name}"]'
 
-    async with BNG_WRITE_LOCKS[bng]:
-        async with pysros_connection(bng) as conn:
-            # El CoA para el cambio de plan no es destructivo y no cambia.
-            if update_data.plan is not None:
-                logger.info(f"Ejecutando CoA para cambiar plan de '{host_name}' a '{update_data.plan}'.")
-                coa_command = f'tools perform subscriber-mgmt coa alc-subscr-id {subnatid}_{host_name} attr ["6527,13={update_data.plan}"]'
-                await _execute_with_retry(conn.cli, coa_command)
-                logger.info(f"SUCCESS: Comando CoA ejecutado para '{host_name}'.")
+    try:
+        async with BNG_WRITE_LOCKS[bng]:
+            async with pysros_connection(bng) as conn:
+                # El CoA para el cambio de plan no es destructivo y no cambia.
+                if update_data.plan is not None:
+                    logger.info(f"Ejecutando CoA para cambiar plan de '{host_name}' a '{update_data.plan}'.")
+                    coa_command = f'tools perform subscriber-mgmt coa alc-subscr-id {subnatid}_{host_name} attr ["6527,13={update_data.plan}"]'
+                    await _execute_with_retry(conn.cli, coa_command)
+                    logger.info(f"SUCCESS: Comando CoA ejecutado para '{host_name}'.")
 
-            changes_made = False
-            
+                changes_made = False
+                
 
-            if update_data.mac is not None:
-                await _execute_with_retry(conn.candidate.set, f"{base_path}/host-identification/mac", update_data.mac)
-                changes_made = True
-            
-            if update_data.state is not None:
-                await _execute_with_retry(conn.candidate.set, f"{base_path}/admin-state", update_data.state)
-                changes_made = True
+                if update_data.mac is not None:
+                    await _execute_with_retry(conn.candidate.set, f"{base_path}/host-identification/mac", update_data.mac)
+                    changes_made = True
+                
+                if update_data.state is not None:
+                    await _execute_with_retry(conn.candidate.set, f"{base_path}/admin-state", update_data.state)
+                    changes_made = True
 
-            if update_data.plan is not None:
-                await _execute_with_retry(conn.candidate.set, f"{base_path}/identification/sla-profile-string", update_data.plan)
-                changes_made = True
+                if update_data.plan is not None:
+                    await _execute_with_retry(conn.candidate.set, f"{base_path}/identification/sla-profile-string", update_data.plan)
+                    changes_made = True
 
-            if changes_made:
-                logger.info(f"Aplicando actualización para '{host_name}' en '{bng}'.")
-                await _execute_with_retry(conn.candidate.commit)
-                logger.info(f"SUCCESS: Payload de actualización aplicado para '{host_name}' en '{bng}'.")
+                if changes_made:
+                    logger.info(f"Aplicando actualización para '{host_name}' en '{bng}'.")
+                    await _execute_with_retry(conn.candidate.commit)
+                    logger.info(f"SUCCESS: Payload de actualización aplicado para '{host_name}' en '{bng}'.")
 
-            # El resto de la lógica para limpiar la sesión si se deshabilita no cambia.
-            if update_data.state == "disable":
-                logger.info(f"Suscriptor '{host_name}' deshabilitado. Procediendo a limpiar la sesión IPoE.")
-                subscriber_id = f"{subnatid}_{host_name}"
-                clear_command = f'clear service id "100" ipoe session subscriber "{subscriber_id}" interface "SUBSCRIBER-INTERFACE-1"'
-                try:
-                    await _execute_with_retry(conn.cli, clear_command)
-                    logger.info(f"SUCCESS: Sesión IPoE para '{subscriber_id}' limpiada en '{bng}'.")
-                except SrosMgmtError as e:
-                    logger.error(f"ERROR: Falló la limpieza de sesión IPoE para '{subscriber_id}' en '{bng}': {e}")
-                    raise Exception(f"Limpieza de sesión IPoE falló: {e}")
+                # El resto de la lógica para limpiar la sesión si se deshabilita no cambia.
+                if update_data.state == "disable":
+                    logger.info(f"Suscriptor '{host_name}' deshabilitado. Procediendo a limpiar la sesión IPoE.")
+                    subscriber_id = f"{subnatid}_{host_name}"
+                    clear_command = f'clear service id "100" ipoe session subscriber "{subscriber_id}" interface "SUBSCRIBER-INTERFACE-1"'
+                    try:
+                        await _execute_with_retry(conn.cli, clear_command)
+                        logger.info(f"SUCCESS: Sesión IPoE para '{subscriber_id}' limpiada en '{bng}'.")
+                    except SrosMgmtError as e:
+                        logger.error(f"ERROR: Falló la limpieza de sesión IPoE para '{subscriber_id}' en '{bng}': {e}")
+                        raise Exception(f"Limpieza de sesión IPoE falló: {e}")
 
-            # La obtención del estado final no cambia.
-            final_state = await asyncio.to_thread(_internal_get_subscriber_by_name_logic, bng, host_name)
-            return {
-                "state": final_state.get("admin-state"),
-                "plan": final_state.get("identification", {}).get("sla-profile-string"),
-                "mac": final_state.get("host-identification", {}).get("mac")
-            }
+                # La obtención del estado final no cambia.
+                final_state = await asyncio.to_thread(_internal_get_subscriber_by_name_logic, bng, host_name)
+                return {
+                    "state": final_state.get("admin-state"),
+                    "plan": final_state.get("identification", {}).get("sla-profile-string"),
+                    "mac": final_state.get("host-identification", {}).get("mac")
+                }
+    finally:
+        semaphore.release()
+
 
 async def _internal_bulk_update_and_clear_logic(bng: str, customers_to_update: dict, new_state: str):
     if not customers_to_update:
         return "No se realizaron cambios."
 
-    async with BNG_WRITE_LOCKS[bng]:
-        async with pysros_connection(bng, timeout=300) as conn:
-            lock_acquired = False
-            try:
-                
-                max_lock_retries = 10
-                retry_delay_seconds = 5
+    semaphore = BNG_QUEUE_SEMAPHORES.get(bng)
+    try:
+        # Intenta adquirir un espacio en la cola sin esperar
+        await asyncio.wait_for(semaphore.acquire(), timeout=0.01)
+    except asyncio.TimeoutError:
+        # Si falla, la cola está llena
+        raise QueueFullError("Servidor ocupado, la cola de operaciones está llena.")
 
-                for attempt in range(max_lock_retries):
-                    try:
-                        logger.info(f"Adquiriendo bloqueo de configuración en {bng} (Intento {attempt + 1}/{max_lock_retries})...")
-                        await asyncio.to_thread(conn.candidate.lock)
-                        lock_acquired = True
-                        logger.info(f"Bloqueo adquirido exitosamente en {bng}.")
-                        break  # Salimos del bucle si el lock se adquiere con éxito
-                    except SrosMgmtError as e:
-                        # Comprobamos si el error es porque el lock ya está en uso
-                        error_str = str(e).lower()
-                        if "lock is already held" in error_str or "does not hold the lock" in error_str:
-                            logger.warning(f"No se pudo adquirir el lock, ya está en uso. Reintentando en {retry_delay_seconds}s...")
-                            await asyncio.sleep(retry_delay_seconds)
-                        else:
-                            raise  # Si es otro tipo de error, lo relanzamos
-                
-                if not lock_acquired:
-                    raise SrosMgmtError(f"No se pudo adquirir el lock de configuración en {bng} después de {max_lock_retries} intentos.")
-
-
-                logger.info(f"Construyendo payload para actualización masiva de {len(customers_to_update)} suscriptores en {bng}.")
-
-                path = '/configure/subscriber-mgmt/local-user-db[name="LUDB-SIMPLE"]/ipoe/host'
-                
-                payload = {}
-                for customer_id in customers_to_update.keys():
-                    payload[customer_id] = {"admin-state": new_state}
-
-                logger.info("Enviando payload masivo al dispositivo...")
-                await _execute_with_retry(conn.candidate.set, path, payload)
-
-                # 4. Hacemos el commit final.
-                logger.info("Enviando commit para el payload masivo...")
-                await _execute_with_retry(conn.candidate.commit)
-                logger.info(f"SUCCESS: Actualización masiva de estado aplicada en '{bng}'.")
-                # --- FIN DE LA OPTIMIZACIÓN ---
-
-                # La lógica de limpieza de sesiones no cambia.
-                if new_state == "disable":
-                    logger.info(f"Iniciando limpieza secuencial de {len(customers_to_update)} sesiones en {bng}.")
-                    errors = {}
-                    for customer_id, data in customers_to_update.items():
-                        subscriber_id = data.get("subscriber_id")
-                        if not subscriber_id: continue
-                        
-                        clear_command = f'clear service id "100" ipoe session subscriber "{subscriber_id}" interface "SUBSCRIBER-INTERFACE-1"'
-                        try:
-                            await _execute_with_retry(conn.cli, clear_command)
-                            logger.info(f"Sesión para {subscriber_id} limpiada.")
-                        except SrosMgmtError as e:
-                            logger.error(f"Fallo al limpiar sesión para {subscriber_id}: {e}")
-                            errors[customer_id] = str(e)
+    try:
+        # Ahora espera el bloqueo para ejecutar la operación de forma secuencial
+        async with BNG_WRITE_LOCKS[bng]:
+            async with pysros_connection(bng, timeout=300) as conn:
+                lock_acquired = False
+                try:
                     
-                    if errors:
-                        raise Exception(f"Fallaron las siguientes limpiezas de sesión: {errors}")
+                    max_lock_retries = 10
+                    retry_delay_seconds = 5
 
-            finally:
-                logger.info(f"Liberando bloqueo de configuración en {bng}...")
-                await asyncio.to_thread(conn.candidate.unlock)
-                logger.info(f"Bloqueo liberado en {bng}.")
+                    for attempt in range(max_lock_retries):
+                        try:
+                            logger.info(f"Adquiriendo bloqueo de configuración en {bng} (Intento {attempt + 1}/{max_lock_retries})...")
+                            await asyncio.to_thread(conn.candidate.lock)
+                            lock_acquired = True
+                            logger.info(f"Bloqueo adquirido exitosamente en {bng}.")
+                            break  # Salimos del bucle si el lock se adquiere con éxito
+                        except SrosMgmtError as e:
+                            # Comprobamos si el error es porque el lock ya está en uso
+                            error_str = str(e).lower()
+                            if "lock is already held" in error_str or "does not hold the lock" in error_str:
+                                logger.warning(f"No se pudo adquirir el lock, ya está en uso. Reintentando en {retry_delay_seconds}s...")
+                                await asyncio.sleep(retry_delay_seconds)
+                            else:
+                                raise  # Si es otro tipo de error, lo relanzamos
+                    
+                    if not lock_acquired:
+                        raise SrosMgmtError(f"No se pudo adquirir el lock de configuración en {bng} después de {max_lock_retries} intentos.")
+
+
+                    logger.info(f"Construyendo payload para actualización masiva de {len(customers_to_update)} suscriptores en {bng}.")
+
+                    path = '/configure/subscriber-mgmt/local-user-db[name="LUDB-SIMPLE"]/ipoe/host'
+                    
+                    payload = {}
+                    for customer_id in customers_to_update.keys():
+                        payload[customer_id] = {"admin-state": new_state}
+
+                    logger.info("Enviando payload masivo al dispositivo...")
+                    await _execute_with_retry(conn.candidate.set, path, payload)
+
+                    # 4. Hacemos el commit final.
+                    logger.info("Enviando commit para el payload masivo...")
+                    await _execute_with_retry(conn.candidate.commit)
+                    logger.info(f"SUCCESS: Actualización masiva de estado aplicada en '{bng}'.")
+                    # --- FIN DE LA OPTIMIZACIÓN ---
+
+                    # La lógica de limpieza de sesiones no cambia.
+                    if new_state == "disable":
+                        logger.info(f"Iniciando limpieza secuencial de {len(customers_to_update)} sesiones en {bng}.")
+                        errors = {}
+                        for customer_id, data in customers_to_update.items():
+                            subscriber_id = data.get("subscriber_id")
+                            if not subscriber_id: continue
+                            
+                            clear_command = f'clear service id "100" ipoe session subscriber "{subscriber_id}" interface "SUBSCRIBER-INTERFACE-1"'
+                            try:
+                                await _execute_with_retry(conn.cli, clear_command)
+                                logger.info(f"Sesión para {subscriber_id} limpiada.")
+                            except SrosMgmtError as e:
+                                logger.error(f"Fallo al limpiar sesión para {subscriber_id}: {e}")
+                                errors[customer_id] = str(e)
+                        
+                        if errors:
+                            raise Exception(f"Fallaron las siguientes limpiezas de sesión: {errors}")
+
+                finally:
+                    logger.info(f"Liberando bloqueo de configuración en {bng}...")
+                    await asyncio.to_thread(conn.candidate.unlock)
+                    logger.info(f"Bloqueo liberado en {bng}.")
+    finally:
+        semaphore.release()
+
 
     return f"Operación masiva completada exitosamente en {bng}."
 
