@@ -65,7 +65,7 @@ async def pysros_connection(bng: str):
                         port=device_config.get("netconf_port", 830),
                         hostkey_verify=False
                     ),
-                    timeout=30.0
+                    timeout=300
                 )
                 logger.info(f"Conexión Pysros a {bng} establecida.")
                 break
