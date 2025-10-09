@@ -298,37 +298,39 @@ async def _internal_bulk_update_and_clear_logic(bng: str, customers_to_update: d
         return "No se realizaron cambios."
 
     async with BNG_WRITE_LOCKS[bng]:
-        # Usamos un timeout largo para toda la operación
         async with pysros_connection(bng, timeout=300) as conn:
             try:
                 logger.info(f"Adquiriendo bloqueo de configuración en {bng}...")
                 await asyncio.to_thread(conn.candidate.lock)
                 logger.info(f"Bloqueo adquirido exitosamente en {bng}.")
 
-                logger.info(f"Iniciando actualización masiva para {len(customers_to_update)} suscriptores en {bng}.")
+                logger.info(f"Construyendo payload para actualización masiva de {len(customers_to_update)} suscriptores en {bng}.")
+
+                path = '/configure/subscriber-mgmt/local-user-db[name="LUDB-SIMPLE"]/ipoe/host'
                 
-                for customer_id in customers_to_update:
-                    path = f'/configure/subscriber-mgmt/local-user-db[name="LUDB-SIMPLE"]/ipoe/host[host-name="{customer_id}"]/admin-state'
-                    await _execute_with_retry(conn.candidate.set, path, new_state)
-                    logger.info(f"Cliente {customer_id} set en bucle con estado {new_state}.")
-                
+                payload = {}
+                for customer_id in customers_to_update.keys():
+                    payload[customer_id] = {"admin-state": new_state}
+
+                logger.info("Enviando payload masivo al dispositivo...")
+                await _execute_with_retry(conn.candidate.set, path, payload)
+
+                # 4. Hacemos el commit final.
+                logger.info("Enviando commit para el payload masivo...")
                 await _execute_with_retry(conn.candidate.commit)
                 logger.info(f"SUCCESS: Actualización masiva de estado aplicada en '{bng}'.")
+                # --- FIN DE LA OPTIMIZACIÓN ---
 
-                # --- INICIO DE LA CORRECCIÓN FINAL ---
-                # Volvemos a un bucle secuencial. Es la única forma de evitar el límite de 255 caracteres.
+                # La lógica de limpieza de sesiones no cambia.
                 if new_state == "disable":
                     logger.info(f"Iniciando limpieza secuencial de {len(customers_to_update)} sesiones en {bng}.")
                     errors = {}
-                    
                     for customer_id, data in customers_to_update.items():
                         subscriber_id = data.get("subscriber_id")
-                        if not subscriber_id:
-                            continue
+                        if not subscriber_id: continue
                         
                         clear_command = f'clear service id "100" ipoe session subscriber "{subscriber_id}" interface "SUBSCRIBER-INTERFACE-1"'
                         try:
-                            # Ejecutamos cada comando individualmente
                             await _execute_with_retry(conn.cli, clear_command)
                             logger.info(f"Sesión para {subscriber_id} limpiada.")
                         except SrosMgmtError as e:
@@ -336,10 +338,8 @@ async def _internal_bulk_update_and_clear_logic(bng: str, customers_to_update: d
                             errors[customer_id] = str(e)
                     
                     if errors:
-                        # Si hubo errores, los propagamos para que el endpoint los reporte
                         raise Exception(f"Fallaron las siguientes limpiezas de sesión: {errors}")
-                # --- FIN DE LA CORRECCIÓN FINAL ---
-    
+
             finally:
                 logger.info(f"Liberando bloqueo de configuración en {bng}...")
                 await asyncio.to_thread(conn.candidate.unlock)
