@@ -5,12 +5,17 @@ from .logging_config import setup_logging # IMPORTAMOS LA FUNCIÓN
 
 setup_logging()
 
-
+from contextlib import asynccontextmanager
 from .routers import subscribers
 
 
-# Llama a la función para configurar el logging al iniciar la app.
-
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Código que se ejecuta ANTES de que la aplicación empiece a aceptar peticiones
+    # Creamos una tarea en segundo plano para no bloquear el inicio.
+    asyncio.create_task(logic.warmup_connections())
+    
+    yield  # La aplicación se ejecuta aquí
 
 # Crea la instancia principal de la aplicación FastAPI.
 # Los títulos y versiones aparecerán en la documentación de Swagger.

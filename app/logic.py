@@ -84,6 +84,34 @@ async def pysros_connection(bng: str):
             logger.info(f"Cerrando conexión NETCONF a {bng}.")
             await asyncio.to_thread(connection.disconnect)
 
+
+
+async def warmup_connections():
+    """
+    Establece y cierra una conexión con cada dispositivo para "calentar"
+    el handshake SSH y acelerar las primeras solicitudes reales.
+    """
+    logger.info("Iniciando el calentamiento de conexiones NETCONF...")
+    
+    warmup_tasks = [
+        _single_warmup(bng) for bng in DEVICES.keys()
+    ]
+    
+    results = await asyncio.gather(*warmup_tasks, return_exceptions=True)
+    
+    for bng, res in zip(DEVICES.keys(), results):
+        if isinstance(res, Exception):
+            logger.error(f"FALLO en el calentamiento de la conexión para '{bng}': {res}")
+        else:
+            logger.info(f"ÉXITO en el calentamiento de la conexión para '{bng}'.")
+
+async def _single_warmup(bng: str):
+    """Función de trabajo para calentar una única conexión."""
+    logger.info(f"Calentando conexión para {bng}...")
+    
+    async with pysros_connection(bng):
+        pass
+
 # --- NUEVO HELPER PARA REINTENTOS DE OPERACIONES ---
 async def _execute_with_retry(func, *args, **kwargs):
     """
@@ -263,22 +291,32 @@ async def _internal_bulk_update_and_clear_logic(bng: str, customers_to_update: d
             logger.info(f"SUCCESS: Actualización masiva de estado aplicada en '{bng}'.")
 
             if new_state == "disable":
-                logger.info(f"Procediendo a limpiar {len(customers_to_update)} sesiones en {bng}.")
-                errors = {}
-                for customer_id, data in customers_to_update.items():
-                    subscriber_id = data.get("subscriber_id")
-                    if not subscriber_id: continue
-                    
-                    clear_command = f'clear service id "100" ipoe session subscriber "{subscriber_id}" interface "SUBSCRIBER-INTERFACE-1"'
-                    try:
-                        await _execute_with_retry(conn.cli, clear_command)
-                        logger.info(f"Sesión para {subscriber_id} limpiada.")
-                    except SrosMgmtError as e:
-                        logger.error(f"Fallo al limpiar sesión para {subscriber_id}: {e}")
-                        errors[customer_id] = str(e)
+                logger.info(f"Procediendo a limpiar {len(customers_to_update)} sesiones en {bng} con un solo comando.")
                 
-                if errors:
-                    raise Exception(f"Fallaron las siguientes limpiezas de sesión: {errors}")
+                # 1. Construir la lista de comandos
+                clear_commands_list = [
+                    f'clear service id "100" ipoe session subscriber "{data["subscriber_id"]}" interface "SUBSCRIBER-INTERFACE-1"'
+                    for data in customers_to_update.values() if data.get("subscriber_id")
+                ]
+
+                if not clear_commands_list:
+                    logger.warning("No hay subscriber-ids válidos para limpiar.")
+                    return "Actualización de estado completada, pero no se limpiaron sesiones."
+
+                # 2. Unir todos los comandos en un solo string, separados por saltos de línea
+                bulk_clear_command = "\n".join(clear_commands_list)
+                
+                try:
+                    # 3. Enviar el bloque completo de comandos en UNA SOLA LLAMADA
+                    logger.info(f"Enviando bloque de {len(clear_commands_list)} comandos clear...")
+                    await _execute_with_retry(conn.cli, bulk_clear_command)
+                    logger.info(f"SUCCESS: Bloque de comandos clear ejecutado en '{bng}'.")
+                
+                except SrosMgmtError as e:
+                    # Si el bloque completo falla, se registra el error.
+                    logger.error(f"ERROR: Falló la ejecución del bloque de limpieza de sesiones en '{bng}': {e}")
+                    # Es importante relanzar la excepción para que el dispatcher la capture
+                    raise Exception(f"Falló la ejecución del bloque de limpieza de sesiones: {e}")
 
     return f"Operación masiva completada exitosamente en {bng}."
 
