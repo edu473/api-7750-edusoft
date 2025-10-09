@@ -47,7 +47,7 @@ BNG_WRITE_LOCKS = {bng: asyncio.Lock() for bng in DEVICES}
 
 # --- GESTOR DE CONEXIONES PYSROS ---
 @asynccontextmanager
-async def pysros_connection(bng: str):
+async def pysros_connection(bng: str, timeout: int = 60):
     device_config = DEVICES.get(bng)
     max_retries, retry_delay_seconds = 20, 3
     connection = None
@@ -61,7 +61,8 @@ async def pysros_connection(bng: str):
                     username=device_config["username"],
                     password=device_config["password"],
                     port=device_config.get("netconf_port", 830),
-                    hostkey_verify=False
+                    hostkey_verify=False,
+                    timeout=timeout
                 )
                 logger.info(f"Conexión Pysros a {bng} establecida.")
                 break
@@ -119,6 +120,7 @@ async def _execute_with_retry(func, *args, **kwargs):
     """
     max_retries = 20
     retry_delay_seconds = 3
+
     for attempt in range(max_retries):
         try:
             # Usamos asyncio.to_thread para no bloquear el loop de eventos
@@ -228,12 +230,15 @@ async def _internal_delete_subscriber_logic(bng: str, accountidbss: str, subnati
 
 async def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnatid: str, update_data: models.UpdateSubscriber):
     host_name = accountidbss
+    # Primero, verificamos que el suscriptor exista. Esto no cambia.
     await asyncio.to_thread(_internal_get_subscriber_by_name_logic, bng, host_name)
 
+    # La ruta base al host del suscriptor. Esto no cambia.
     base_path = f'/configure/subscriber-mgmt/local-user-db[name="LUDB-SIMPLE"]/ipoe/host[host-name="{host_name}"]'
 
     async with BNG_WRITE_LOCKS[bng]:
         async with pysros_connection(bng) as conn:
+            # El CoA para el cambio de plan no es destructivo y no cambia.
             if update_data.plan is not None:
                 logger.info(f"Ejecutando CoA para cambiar plan de '{host_name}' a '{update_data.plan}'.")
                 coa_command = f'tools perform subscriber-mgmt coa alc-subscr-id {subnatid}_{host_name} attr ["6527,13={update_data.plan}"]'
@@ -241,21 +246,34 @@ async def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnati
                 logger.info(f"SUCCESS: Comando CoA ejecutado para '{host_name}'.")
 
             changes_made = False
+            
+            # --- INICIO DE LA CORRECCIÓN ---
+
             if update_data.mac is not None:
+                # CORREGIDO: Apuntamos directamente a la 'hoja' -> .../mac
+                # ANTES: Apuntaba a .../host-identification, borrando todo dentro.
                 await _execute_with_retry(conn.candidate.set, f"{base_path}/host-identification/mac", update_data.mac)
                 changes_made = True
+            
             if update_data.state is not None:
+                # ESTE YA ESTABA CORRECTO: Apunta directamente a la 'hoja' -> .../admin-state
                 await _execute_with_retry(conn.candidate.set, f"{base_path}/admin-state", update_data.state)
                 changes_made = True
+
             if update_data.plan is not None:
+                # CORREGIDO: Apuntamos directamente a la 'hoja' -> .../sla-profile-string
+                # ANTES: Apuntaba a .../identification, borrando subscriber-id, etc.
                 await _execute_with_retry(conn.candidate.set, f"{base_path}/identification/sla-profile-string", update_data.plan)
                 changes_made = True
+
+            # --- FIN DE LA CORRECCIÓN ---
 
             if changes_made:
                 logger.info(f"Aplicando actualización para '{host_name}' en '{bng}'.")
                 await _execute_with_retry(conn.candidate.commit)
                 logger.info(f"SUCCESS: Payload de actualización aplicado para '{host_name}' en '{bng}'.")
 
+            # El resto de la lógica para limpiar la sesión si se deshabilita no cambia.
             if update_data.state == "disable":
                 logger.info(f"Suscriptor '{host_name}' deshabilitado. Procediendo a limpiar la sesión IPoE.")
                 subscriber_id = f"{subnatid}_{host_name}"
@@ -267,6 +285,7 @@ async def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnati
                     logger.error(f"ERROR: Falló la limpieza de sesión IPoE para '{subscriber_id}' en '{bng}': {e}")
                     raise Exception(f"Limpieza de sesión IPoE falló: {e}")
 
+            # La obtención del estado final no cambia.
             final_state = await asyncio.to_thread(_internal_get_subscriber_by_name_logic, bng, host_name)
             return {
                 "state": final_state.get("admin-state"),
@@ -274,13 +293,13 @@ async def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnati
                 "mac": final_state.get("host-identification", {}).get("mac")
             }
 
-
 async def _internal_bulk_update_and_clear_logic(bng: str, customers_to_update: dict, new_state: str):
     if not customers_to_update:
         return "No se realizaron cambios."
 
     async with BNG_WRITE_LOCKS[bng]:
-        async with pysros_connection(bng) as conn:
+        # Usamos un timeout largo para toda la operación
+        async with pysros_connection(bng, timeout=300) as conn:
             logger.info(f"Iniciando actualización masiva para {len(customers_to_update)} suscriptores en {bng}.")
             
             for customer_id in customers_to_update:
@@ -290,15 +309,20 @@ async def _internal_bulk_update_and_clear_logic(bng: str, customers_to_update: d
             await _execute_with_retry(conn.candidate.commit)
             logger.info(f"SUCCESS: Actualización masiva de estado aplicada en '{bng}'.")
 
+            # --- INICIO DE LA CORRECCIÓN FINAL ---
+            # Volvemos a un bucle secuencial. Es la única forma de evitar el límite de 255 caracteres.
             if new_state == "disable":
-                logger.info(f"Procediendo a limpiar {len(customers_to_update)} sesiones en {bng}.")
+                logger.info(f"Iniciando limpieza secuencial de {len(customers_to_update)} sesiones en {bng}.")
                 errors = {}
+                
                 for customer_id, data in customers_to_update.items():
                     subscriber_id = data.get("subscriber_id")
-                    if not subscriber_id: continue
+                    if not subscriber_id:
+                        continue
                     
                     clear_command = f'clear service id "100" ipoe session subscriber "{subscriber_id}" interface "SUBSCRIBER-INTERFACE-1"'
                     try:
+                        # Ejecutamos cada comando individualmente
                         await _execute_with_retry(conn.cli, clear_command)
                         logger.info(f"Sesión para {subscriber_id} limpiada.")
                     except SrosMgmtError as e:
@@ -306,7 +330,9 @@ async def _internal_bulk_update_and_clear_logic(bng: str, customers_to_update: d
                         errors[customer_id] = str(e)
                 
                 if errors:
+                    # Si hubo errores, los propagamos para que el endpoint los reporte
                     raise Exception(f"Fallaron las siguientes limpiezas de sesión: {errors}")
+            # --- FIN DE LA CORRECCIÓN FINAL ---
 
     return f"Operación masiva completada exitosamente en {bng}."
 
