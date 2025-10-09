@@ -292,7 +292,7 @@ async def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnati
                 "plan": final_state.get("identification", {}).get("sla-profile-string"),
                 "mac": final_state.get("host-identification", {}).get("mac")
             }
-#
+
 async def _internal_bulk_update_and_clear_logic(bng: str, customers_to_update: dict, new_state: str):
     if not customers_to_update:
         return "No se realizaron cambios."
