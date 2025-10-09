@@ -73,7 +73,7 @@ async def pysros_connection(bng: str):
                 logger.warning(f"WARN: Intento {attempt + 1} de conexión pysros a '{bng}' fallido: {type(e).__name__} - {e}")
                 
                 error_str = str(e)
-                if "Commit or validate is in progress" in error_str or isinstance(e, FutureTimeoutError):
+                if "Commit or validate is in progress" in error_str or "Database write access is not available" in error_str or isinstance(e, FutureTimeoutError):
                     logger.warning(f"Error de sesión o timeout detectado. Forzando limpieza de sesiones para el usuario '{device_config['username']}' en {bng}...")
                     await asyncio.to_thread(_disconnect_netconf_sessions, bng, username_to_disconnect=device_config['username'])
                     await asyncio.sleep(retry_delay_seconds + 2)
