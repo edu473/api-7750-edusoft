@@ -283,34 +283,25 @@ async def _internal_bulk_update_and_clear_logic(bng: str, customers_to_update: d
         async with pysros_connection(bng) as conn:
             logger.info(f"Iniciando actualización masiva para {len(customers_to_update)} suscriptores en {bng}.")
 
-            # --- CONSTRUCCIÓN DEL PAYLOAD PARA UN 'SET' ÚNICO Y EFICIENTE ---
 
-            # 1. Creamos una lista de diccionarios. Cada diccionario representa un
-            #    elemento de la lista "host" que queremos modificar.
+            # 1. Construir la lista de diccionarios. Cada diccionario debe contener la
+            #    clave ('host-name') y el valor a modificar.
             hosts_payload = [
                 {
-                    # "host-name" es la CLAVE que el router usa para encontrar al suscriptor en la lista.
                     "host-name": customer_id,
-                    # "admin-state" es el VALOR que queremos cambiar para ese suscriptor.
                     "admin-state": new_state
                 }
                 for customer_id in customers_to_update
             ]
-
-            # 2. Creamos el diccionario final. La clave "host" le dice a pysros que
-            #    estamos modificando la lista llamada "host". El valor es la lista de cambios.
-            bulk_update_payload = {
-                "host": hosts_payload
-            }
             
-            # 3. El path apunta al CONTENEDOR PADRE de la lista "host".
-            path = '/configure/subscriber-mgmt/local-user-db[name="LUDB-SIMPLE"]/ipoe'
+            # 2. El path debe apuntar al contenedor de la lista, es decir, a 'host'.
+            path = '/configure/subscriber-mgmt/local-user-db[name="LUDB-SIMPLE"]/ipoe/host'
 
-            # 4. Ejecutamos UNA SOLA LLAMADA a .set() con el payload masivo.
-            #    Esto se traduce en una única y eficiente operación NETCONF.
-            await _execute_with_retry(conn.candidate.set, path, bulk_update_payload)
+            # 3. Se pasa la LISTA de diccionarios directamente como el valor.
+            #    pysros entiende que esto es una operación de fusión en una lista.
+            await _execute_with_retry(conn.candidate.set, path, hosts_payload)
             
-            # 5. Confirmamos todos los cambios a la vez en una sola transacción.
+            # 4. Confirmar todos los cambios a la vez.
             await _execute_with_retry(conn.candidate.commit)
             logger.info(f"SUCCESS: Actualización masiva de estado aplicada en '{bng}'.")
 
