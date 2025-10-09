@@ -282,50 +282,33 @@ async def _internal_bulk_update_and_clear_logic(bng: str, customers_to_update: d
     async with BNG_WRITE_LOCKS[bng]:
         async with pysros_connection(bng) as conn:
             logger.info(f"Iniciando actualización masiva para {len(customers_to_update)} suscriptores en {bng}.")
-
-
-            # 1. Construir la lista de diccionarios. Cada diccionario debe contener la
-            #    clave ('host-name') y el valor a modificar.
-            hosts_payload = [
-                {
-                    "host-name": customer_id,
-                    "admin-state": new_state
-                }
-                for customer_id in customers_to_update
-            ]
             
-            # 2. El path debe apuntar al contenedor de la lista, es decir, a 'host'.
-            path = '/configure/subscriber-mgmt/local-user-db[name="LUDB-SIMPLE"]/ipoe/host'
-
-            # 3. Se pasa la LISTA de diccionarios directamente como el valor.
-            #    pysros entiende que esto es una operación de fusión en una lista.
-            await _execute_with_retry(conn.candidate.set, path, hosts_payload)
+            for customer_id in customers_to_update:
+                path = f'/configure/subscriber-mgmt/local-user-db[name="LUDB-SIMPLE"]/ipoe/host[host-name="{customer_id}"]/admin-state'
+                await _execute_with_retry(conn.candidate.set, path, new_state)
             
-            # 4. Confirmar todos los cambios a la vez.
             await _execute_with_retry(conn.candidate.commit)
             logger.info(f"SUCCESS: Actualización masiva de estado aplicada en '{bng}'.")
 
-            # --- La lógica de limpieza masiva eficiente se mantiene sin cambios ---
             if new_state == "disable":
-                logger.info(f"Procediendo a limpiar {len(customers_to_update)} sesiones en {bng} con un solo comando.")
-                
-                clear_commands_list = [
-                    f'clear service id "100" ipoe session subscriber "{data["subscriber_id"]}" interface "SUBSCRIBER-INTERFACE-1"'
-                    for data in customers_to_update.values() if data.get("subscriber_id")
-                ]
-
-                if clear_commands_list:
-                    bulk_clear_command = "\n".join(clear_commands_list)
+                logger.info(f"Procediendo a limpiar {len(customers_to_update)} sesiones en {bng}.")
+                errors = {}
+                for customer_id, data in customers_to_update.items():
+                    subscriber_id = data.get("subscriber_id")
+                    if not subscriber_id: continue
+                    
+                    clear_command = f'clear service id "100" ipoe session subscriber "{subscriber_id}" interface "SUBSCRIBER-INTERFACE-1"'
                     try:
-                        logger.info(f"Enviando bloque de {len(clear_commands_list)} comandos clear...")
-                        await _execute_with_retry(conn.cli, bulk_clear_command)
-                        logger.info(f"SUCCESS: Bloque de comandos clear ejecutado en '{bng}'.")
+                        await _execute_with_retry(conn.cli, clear_command)
+                        logger.info(f"Sesión para {subscriber_id} limpiada.")
                     except SrosMgmtError as e:
-                        logger.error(f"ERROR: Falló la ejecución del bloque de limpieza: {e}")
-                        raise Exception(f"Falló la ejecución del bloque de limpieza: {e}")
+                        logger.error(f"Fallo al limpiar sesión para {subscriber_id}: {e}")
+                        errors[customer_id] = str(e)
+                
+                if errors:
+                    raise Exception(f"Fallaron las siguientes limpiezas de sesión: {errors}")
 
     return f"Operación masiva completada exitosamente en {bng}."
-
 
 def _disconnect_netconf_sessions(bng: str):
     device_config = DEVICES.get(bng)
