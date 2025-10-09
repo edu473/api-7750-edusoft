@@ -1,6 +1,7 @@
 # app/logic.py
 import time
 import asyncio
+from asyncio import TimeoutError as FutureTimeoutError
 import os
 from dotenv import load_dotenv
 from pysros.management import connect as pysros_connect
@@ -47,7 +48,7 @@ BNG_WRITE_LOCKS = {bng: asyncio.Lock() for bng in DEVICES}
 
 # --- GESTOR DE CONEXIONES PYSROS ---
 @asynccontextmanager
-async def pysros_connection(bng: str, timeout: int = 60):
+async def pysros_connection(bng: str):
     device_config = DEVICES.get(bng)
     max_retries, retry_delay_seconds = 20, 3
     connection = None
@@ -55,29 +56,34 @@ async def pysros_connection(bng: str, timeout: int = 60):
         for attempt in range(max_retries):
             try:
                 logger.info(f"Intentando conectar a {bng} (Intento {attempt + 1}/{max_retries})...")
-                connection = await asyncio.to_thread(
-                    pysros_connect,
-                    host=device_config["host"],
-                    username=device_config["username"],
-                    password=device_config["password"],
-                    port=device_config.get("netconf_port", 830),
-                    hostkey_verify=False,
-                    timeout=timeout
+                connection = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        pysros_connect,
+                        host=device_config["host"],
+                        username=device_config["username"],
+                        password=device_config["password"],
+                        port=device_config.get("netconf_port", 830),
+                        hostkey_verify=False
+                    ),
+                    timeout=30.0
                 )
                 logger.info(f"Conexión Pysros a {bng} establecida.")
                 break
-            except SrosMgmtError as e:
-                logger.warning(f"WARN: Intento {attempt + 1} de conexión pysros a '{bng}' fallido: {e}")
-                if "reached maximum number of private sessions" in str(e):
+            except (SrosMgmtError, FutureTimeoutError) as e:
+                logger.warning(f"WARN: Intento {attempt + 1} de conexión pysros a '{bng}' fallido: {type(e).__name__} - {e}")
+                
+                error_str = str(e)
+                if "Commit or validate is in progress" in error_str or isinstance(e, FutureTimeoutError):
+                    logger.warning(f"Error de sesión o timeout detectado. Forzando limpieza de sesiones para el usuario '{device_config['username']}' en {bng}...")
+                    await asyncio.to_thread(_disconnect_netconf_sessions, bng, username_to_disconnect=device_config['username'])
+                    await asyncio.sleep(retry_delay_seconds + 2)
+                elif "reached maximum number of private sessions" in error_str:
                     await asyncio.to_thread(_disconnect_netconf_sessions, bng)
-                    await asyncio.sleep(retry_delay_seconds)
-                elif "Commit or validate is in progress" in str(e):
-                    await asyncio.sleep(retry_delay_seconds)
                 else:
                     raise e
         
         if not connection:
-            raise SrosMgmtError(f"No se pudo conectar con pysros a {bng} por bloqueo persistente.")
+            raise SrosMgmtError(f"No se pudo conectar con pysros a {bng} por bloqueo persistente o timeout.")
         
         yield connection
     finally:
@@ -113,26 +119,27 @@ async def _single_warmup(bng: str):
     async with pysros_connection(bng):
         pass
 
-# --- NUEVO HELPER PARA REINTENTOS DE OPERACIONES ---
 async def _execute_with_retry(func, *args, **kwargs):
-    """
-    Ejecuta una función de pysros y la reintenta si encuentra un error de bloqueo.
-    """
-    max_retries = 20
+    max_retries = 10
     retry_delay_seconds = 3
-
+    operation_timeout = 60.0
     for attempt in range(max_retries):
         try:
-            # Usamos asyncio.to_thread para no bloquear el loop de eventos
-            return await asyncio.to_thread(func, *args, **kwargs)
-        except SrosMgmtError as e:
-            if "Commit or validate is in progress" in str(e) or "Database write access is not available" in str(e):
+            return await asyncio.wait_for(
+                asyncio.to_thread(func, *args, **kwargs),
+                timeout=operation_timeout
+            )
+        except (SrosMgmtError, FutureTimeoutError) as e:
+            error_str = str(e)
+            if "Commit or validate is in progress" in error_str or "Database write access is not available" in error_str:
                 logger.warning(f"Operación falló por bloqueo, reintentando en {retry_delay_seconds}s (Intento {attempt + 1}/{max_retries})...")
                 await asyncio.sleep(retry_delay_seconds)
+            elif isinstance(e, FutureTimeoutError):
+                logger.warning(f"Operación excedió el timeout de {operation_timeout}s, reintentando (Intento {attempt + 1}/{max_retries})...")
+                await asyncio.sleep(retry_delay_seconds)
             else:
-                # Si es otro tipo de error, lo relanzamos inmediatamente
                 raise e
-    raise SrosMgmtError(f"La operación falló después de {max_retries} intentos por bloqueo persistente.")
+    raise SrosMgmtError(f"La operación falló después de {max_retries} intentos por bloqueo persistente o timeout.")
 
 
 # --- FUNCIONES DE LECTURA (gNMI - SIN CAMBIOS) ---
@@ -247,26 +254,18 @@ async def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnati
 
             changes_made = False
             
-            # --- INICIO DE LA CORRECCIÓN ---
 
             if update_data.mac is not None:
-                # CORREGIDO: Apuntamos directamente a la 'hoja' -> .../mac
-                # ANTES: Apuntaba a .../host-identification, borrando todo dentro.
                 await _execute_with_retry(conn.candidate.set, f"{base_path}/host-identification/mac", update_data.mac)
                 changes_made = True
             
             if update_data.state is not None:
-                # ESTE YA ESTABA CORRECTO: Apunta directamente a la 'hoja' -> .../admin-state
                 await _execute_with_retry(conn.candidate.set, f"{base_path}/admin-state", update_data.state)
                 changes_made = True
 
             if update_data.plan is not None:
-                # CORREGIDO: Apuntamos directamente a la 'hoja' -> .../sla-profile-string
-                # ANTES: Apuntaba a .../identification, borrando subscriber-id, etc.
                 await _execute_with_retry(conn.candidate.set, f"{base_path}/identification/sla-profile-string", update_data.plan)
                 changes_made = True
-
-            # --- FIN DE LA CORRECCIÓN ---
 
             if changes_made:
                 logger.info(f"Aplicando actualización para '{host_name}' en '{bng}'.")
@@ -368,16 +367,30 @@ async def _internal_bulk_update_and_clear_logic(bng: str, customers_to_update: d
 
     return f"Operación masiva completada exitosamente en {bng}."
 
-def _disconnect_netconf_sessions(bng: str):
+def _disconnect_netconf_sessions(bng: str, username_to_disconnect: str | None = None):
+    """
+    Desconecta sesiones NETCONF. Si se provee un nombre de usuario, desconecta
+    solo las sesiones de ese usuario. De lo contrario, desconecta todas.
+    """
     device_config = DEVICES.get(bng)
     net_connect = None
-    logger.info(f"Iniciando limpieza de sesiones NETCONF en {bng} con Netmiko (SSH).")
+    
+    # --- MODIFICACIÓN CLAVE ---
+    # Construir el comando dinámicamente
+    if username_to_disconnect:
+        command = f"admin disconnect session-type netconf username {username_to_disconnect}"
+        log_message = f"Iniciando limpieza de sesiones NETCONF para el usuario '{username_to_disconnect}' en {bng}."
+    else:
+        command = "admin disconnect session-type netconf"
+        log_message = f"Iniciando limpieza general de sesiones NETCONF en {bng}."
+
+    logger.info(log_message)
     netmiko_device = {'device_type': 'nokia_sros', 'host': device_config["host"], 'username': device_config["username"], 'password': device_config["password"], 'port': 22}
+    
     try:
         net_connect = ConnectHandler(**netmiko_device)
-        command = 'admin disconnect session-type netconf'
         net_connect.send_command(command, read_timeout=60)
-        logger.info(f"SUCCESS: Se desconectaron las sesiones NETCONF en '{bng}'.")
+        logger.info(f"SUCCESS: Comando de desconexión ejecutado en '{bng}'.")
     except (NetmikoTimeoutException, NetmikoAuthenticationException) as e:
         logger.error(f"Error de conexión Netmiko al limpiar sesiones en {bng}: {e}")
         raise e
