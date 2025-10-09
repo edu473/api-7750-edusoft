@@ -118,7 +118,7 @@ async def _internal_create_subscriber_logic(bng: str, subscriber_data: models.Su
                         timeout_error_count += 1
                         if timeout_error_count >= max_timeout_errors:
                             raise Exception(f"La operación falló por timeout después de {max_timeout_errors} intentos.")
-                        time.sleep(3)
+                        time.sleep(5)
                         continue
                     elif "reached maximum number of private sessions" in str(e):
                         _disconnect_netconf_sessions(bng)
@@ -164,7 +164,7 @@ async def _internal_delete_subscriber_logic(bng: str, accountidbss: str, subnati
                         timeout_error_count += 1
                         if timeout_error_count >= max_timeout_errors:
                             raise Exception(f"La operación falló por timeout después de {max_timeout_errors} intentos.")
-                        time.sleep(3)
+                        time.sleep(5)
                         continue
                     elif "reached maximum number of private sessions" in str(e):
                         _disconnect_netconf_sessions(bng)
@@ -231,7 +231,7 @@ async def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnati
                         timeout_error_count += 1
                         if timeout_error_count >= max_timeout_errors:
                             raise Exception(f"La operación falló por timeout después de {max_timeout_errors} intentos.")
-                        time.sleep(2)
+                        time.sleep(5)
                         continue
                     elif "reached maximum number of private sessions" in str(e):
                         _disconnect_netconf_sessions(bng)
