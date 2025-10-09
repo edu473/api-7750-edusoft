@@ -48,16 +48,9 @@ BNG_WRITE_LOCKS = {bng: asyncio.Lock() for bng in DEVICES}
 # --- GESTOR DE CONEXIONES PYSROS ---
 @asynccontextmanager
 async def pysros_connection(bng: str):
-    """
-    Un context manager asíncrono para manejar conexiones pysros con reintentos
-    y desconexión garantizada.
-    """
     device_config = DEVICES.get(bng)
     max_retries, retry_delay_seconds = 20, 3
     connection = None
-
-    # CORRECCIÓN: El bloque try/finally ahora envuelve toda la lógica para
-    # garantizar que 'finally' se ejecute incluso si hay un error en el bloque 'with'.
     try:
         for attempt in range(max_retries):
             try:
@@ -71,30 +64,45 @@ async def pysros_connection(bng: str):
                     hostkey_verify=False
                 )
                 logger.info(f"Conexión Pysros a {bng} establecida.")
-                break  # Salir del bucle si la conexión es exitosa
+                break
             except SrosMgmtError as e:
                 logger.warning(f"WARN: Intento {attempt + 1} de conexión pysros a '{bng}' fallido: {e}")
                 if "reached maximum number of private sessions" in str(e):
-                    logger.warning(f"Se alcanzó el máximo de sesiones privadas en {bng}. Intentando limpiar...")
                     await asyncio.to_thread(_disconnect_netconf_sessions, bng)
                     await asyncio.sleep(retry_delay_seconds)
-                elif "Commit or validate is in progress" in str(e) or "Database write access is not available" in str(e):
+                elif "Commit or validate is in progress" in str(e):
                     await asyncio.sleep(retry_delay_seconds)
                 else:
-                    raise e # Relanzar otros errores de conexión
+                    raise e
         
         if not connection:
             raise SrosMgmtError(f"No se pudo conectar con pysros a {bng} por bloqueo persistente.")
-
-        # Entregar la conexión al bloque 'with'
+        
         yield connection
-
     finally:
-        # Este bloque se ejecutará SIEMPRE al salir del 'with',
-        # ya sea por éxito o por cualquier excepción.
         if connection:
             logger.info(f"Cerrando conexión NETCONF a {bng}.")
             await asyncio.to_thread(connection.disconnect)
+
+# --- NUEVO HELPER PARA REINTENTOS DE OPERACIONES ---
+async def _execute_with_retry(func, *args, **kwargs):
+    """
+    Ejecuta una función de pysros y la reintenta si encuentra un error de bloqueo.
+    """
+    max_retries = 20
+    retry_delay_seconds = 3
+    for attempt in range(max_retries):
+        try:
+            # Usamos asyncio.to_thread para no bloquear el loop de eventos
+            return await asyncio.to_thread(func, *args, **kwargs)
+        except SrosMgmtError as e:
+            if "Commit or validate is in progress" in str(e) or "Database write access is not available" in str(e):
+                logger.warning(f"Operación falló por bloqueo, reintentando en {retry_delay_seconds}s (Intento {attempt + 1}/{max_retries})...")
+                await asyncio.sleep(retry_delay_seconds)
+            else:
+                # Si es otro tipo de error, lo relanzamos inmediatamente
+                raise e
+    raise SrosMgmtError(f"La operación falló después de {max_retries} intentos por bloqueo persistente.")
 
 
 # --- FUNCIONES DE LECTURA (gNMI - SIN CAMBIOS) ---
@@ -137,7 +145,7 @@ def _internal_get_subscriber_by_name_logic(bng: str, accountidbss: str):
             raise ValueError(f"Suscriptor '{accountidbss}' no encontrado.")
         return updates[0]["val"]
 
-# --- FUNCIONES DE ESCRITURA (CORREGIDAS PARA USAR EL MODELO DE OBJETOS PYSROS) ---
+# --- FUNCIONES DE ESCRITURA (MODIFICADAS PARA USAR EL HELPER DE REINTENTOS) ---
 
 async def _internal_create_subscriber_logic(bng: str, subscriber_data: models.Subscriber):
     host_name = subscriber_data.accountidbss
@@ -147,29 +155,22 @@ async def _internal_create_subscriber_logic(bng: str, subscriber_data: models.Su
     except ValueError:
         pass
 
-    # CORRECCIÓN: Usar el método .set() con un path y un diccionario como payload
     path = f'/configure/subscriber-mgmt/local-user-db[name="LUDB-SIMPLE"]/ipoe/host[host-name="{host_name}"]'
     payload = {
-        "admin-state": subscriber_data.state,
-        "host-identification": {"mac": subscriber_data.mac},
+        "admin-state": subscriber_data.state, "host-identification": {"mac": subscriber_data.mac},
         "identification": {
-            "option-number": 254,
-            "sla-profile-string": subscriber_data.plan,
-            "sub-profile-string": "DEFAULT-SUB-PROF",
-            "subscriber-id": f"{subscriber_data.subnatid}_{host_name}"
+            "option-number": 254, "sla-profile-string": subscriber_data.plan,
+            "sub-profile-string": "DEFAULT-SUB-PROF", "subscriber-id": f"{subscriber_data.subnatid}_{host_name}"
         },
         "ipv4": {"address": {"pool": {"primary": subscriber_data.olt}}},
-        "ipv6": {
-            "address-pool": subscriber_data.olt,
-            "delegated-prefix-pool": subscriber_data.olt
-        }
+        "ipv6": {"address-pool": subscriber_data.olt, "delegated-prefix-pool": subscriber_data.olt}
     }
     
     async with BNG_WRITE_LOCKS[bng]:
         async with pysros_connection(bng) as conn:
-            logger.info(f"Creando suscriptor '{host_name}' en BNG '{bng}' vía pysros object model.")
-            await asyncio.to_thread(conn.candidate.set, path, payload)
-            await asyncio.to_thread(conn.candidate.commit)
+            logger.info(f"Creando suscriptor '{host_name}' en BNG '{bng}'...")
+            await _execute_with_retry(conn.candidate.set, path, payload)
+            await _execute_with_retry(conn.candidate.commit)
             logger.info(f"SUCCESS: Suscriptor '{host_name}' creado exitosamente en '{bng}'.")
             return f"Suscriptor '{host_name}' creado exitosamente."
 
@@ -179,21 +180,20 @@ async def _internal_delete_subscriber_logic(bng: str, accountidbss: str, subnati
     try:
         host_data = await asyncio.to_thread(_internal_get_subscriber_by_name_logic, bng, host_name)
         if host_data.get("identification", {}).get("subscriber-id") != f"{subnatid}_{accountidbss}":
-            raise ValueError(f"Conflicto de datos en {bng}: El subnatid no coincide para '{host_name}'.")
+            raise ValueError(f"Conflicto de datos: subnatid no coincide para '{host_name}'.")
         if host_data.get("ipv4", {}).get("address", {}).get("pool", {}).get("primary") != olt:
-            raise ValueError(f"Conflicto de datos en {bng}: La OLT/Pool no coincide para '{host_name}'.")
+            raise ValueError(f"Conflicto de datos: OLT/Pool no coincide para '{host_name}'.")
     except ValueError as e:
         logger.warning(f"No se puede eliminar '{host_name}': {e}")
         raise e
 
-    # CORRECCIÓN: Usar el método .delete()
     path = f'/configure/subscriber-mgmt/local-user-db[name="LUDB-SIMPLE"]/ipoe/host[host-name="{host_name}"]'
 
     async with BNG_WRITE_LOCKS[bng]:
         async with pysros_connection(bng) as conn:
-            logger.info(f"Eliminando suscriptor '{host_name}' de BNG '{bng}' vía pysros object model.")
-            await asyncio.to_thread(conn.candidate.delete, path)
-            await asyncio.to_thread(conn.candidate.commit)
+            logger.info(f"Eliminando suscriptor '{host_name}' de BNG '{bng}'...")
+            await _execute_with_retry(conn.candidate.delete, path)
+            await _execute_with_retry(conn.candidate.commit)
             logger.info(f"SUCCESS: Suscriptor '{host_name}' eliminado con éxito de '{bng}'.")
             return f"Suscriptor '{host_name}' eliminado exitosamente."
 
@@ -209,24 +209,23 @@ async def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnati
             if update_data.plan is not None:
                 logger.info(f"Ejecutando CoA para cambiar plan de '{host_name}' a '{update_data.plan}'.")
                 coa_command = f'tools perform subscriber-mgmt coa alc-subscr-id {subnatid}_{host_name} attr ["6527,13={update_data.plan}"]'
-                await asyncio.to_thread(conn.cli, coa_command)
+                await _execute_with_retry(conn.cli, coa_command)
                 logger.info(f"SUCCESS: Comando CoA ejecutado para '{host_name}'.")
 
-            # CORRECCIÓN: Realizar un .set() para cada atributo a cambiar
             changes_made = False
             if update_data.mac is not None:
-                await asyncio.to_thread(conn.candidate.set, f"{base_path}/host-identification/mac", update_data.mac)
+                await _execute_with_retry(conn.candidate.set, f"{base_path}/host-identification/mac", update_data.mac)
                 changes_made = True
             if update_data.state is not None:
-                await asyncio.to_thread(conn.candidate.set, f"{base_path}/admin-state", update_data.state)
+                await _execute_with_retry(conn.candidate.set, f"{base_path}/admin-state", update_data.state)
                 changes_made = True
             if update_data.plan is not None:
-                await asyncio.to_thread(conn.candidate.set, f"{base_path}/identification/sla-profile-string", update_data.plan)
+                await _execute_with_retry(conn.candidate.set, f"{base_path}/identification/sla-profile-string", update_data.plan)
                 changes_made = True
 
             if changes_made:
                 logger.info(f"Aplicando actualización para '{host_name}' en '{bng}'.")
-                await asyncio.to_thread(conn.candidate.commit)
+                await _execute_with_retry(conn.candidate.commit)
                 logger.info(f"SUCCESS: Payload de actualización aplicado para '{host_name}' en '{bng}'.")
 
             if update_data.state == "disable":
@@ -234,7 +233,7 @@ async def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnati
                 subscriber_id = f"{subnatid}_{host_name}"
                 clear_command = f'clear service id "100" ipoe session subscriber "{subscriber_id}" interface "SUBSCRIBER-INTERFACE-1"'
                 try:
-                    await asyncio.to_thread(conn.cli, clear_command)
+                    await _execute_with_retry(conn.cli, clear_command)
                     logger.info(f"SUCCESS: Sesión IPoE para '{subscriber_id}' limpiada en '{bng}'.")
                 except SrosMgmtError as e:
                     logger.error(f"ERROR: Falló la limpieza de sesión IPoE para '{subscriber_id}' en '{bng}': {e}")
@@ -250,33 +249,29 @@ async def _internal_update_subscriber_logic(bng: str, accountidbss: str, subnati
 
 async def _internal_bulk_update_and_clear_logic(bng: str, customers_to_update: dict, new_state: str):
     if not customers_to_update:
-        logger.info(f"No hay suscriptores para procesar en {bng}.")
         return "No se realizaron cambios."
 
     async with BNG_WRITE_LOCKS[bng]:
         async with pysros_connection(bng) as conn:
-            logger.info(f"Iniciando actualización masiva de estado para {len(customers_to_update)} suscriptores en {bng}.")
+            logger.info(f"Iniciando actualización masiva para {len(customers_to_update)} suscriptores en {bng}.")
             
-            # CORRECCIÓN: Iterar y hacer .set() para cada cliente. La librería agrupará los cambios.
             for customer_id in customers_to_update:
                 path = f'/configure/subscriber-mgmt/local-user-db[name="LUDB-SIMPLE"]/ipoe/host[host-name="{customer_id}"]/admin-state'
-                await asyncio.to_thread(conn.candidate.set, path, new_state)
+                await _execute_with_retry(conn.candidate.set, path, new_state)
             
-            await asyncio.to_thread(conn.candidate.commit)
+            await _execute_with_retry(conn.candidate.commit)
             logger.info(f"SUCCESS: Actualización masiva de estado aplicada en '{bng}'.")
 
             if new_state == "disable":
-                logger.info(f"Estado es 'disable', procediendo a limpiar {len(customers_to_update)} sesiones en {bng}.")
+                logger.info(f"Procediendo a limpiar {len(customers_to_update)} sesiones en {bng}.")
                 errors = {}
                 for customer_id, data in customers_to_update.items():
                     subscriber_id = data.get("subscriber_id")
-                    if not subscriber_id:
-                        logger.warning(f"No se puede limpiar sesión para {customer_id}, falta subscriber_id.")
-                        continue
+                    if not subscriber_id: continue
                     
                     clear_command = f'clear service id "100" ipoe session subscriber "{subscriber_id}" interface "SUBSCRIBER-INTERFACE-1"'
                     try:
-                        await asyncio.to_thread(conn.cli, clear_command)
+                        await _execute_with_retry(conn.cli, clear_command)
                         logger.info(f"Sesión para {subscriber_id} limpiada.")
                     except SrosMgmtError as e:
                         logger.error(f"Fallo al limpiar sesión para {subscriber_id}: {e}")
