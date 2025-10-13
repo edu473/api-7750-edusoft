@@ -257,6 +257,12 @@ async def _internal_delete_subscriber_logic(bng: str, accountidbss: str, subnati
                 await _execute_with_retry(conn.candidate.delete, path)
                 await _execute_with_retry(conn.candidate.commit)
                 logger.info(f"SUCCESS: Suscriptor '{host_name}' eliminado con éxito de '{bng}'.")
+                clear_command = f'clear service id "100" ipoe session subscriber "{subnatid}_{accountidbss}" interface "SUBSCRIBER-INTERFACE-1"'
+                try:
+                    await _execute_with_retry(conn.cli, clear_command)
+                    logger.info(f"Sesión para {subscriber_id} limpiada.")
+                except SrosMgmtError as e:
+                    logger.error(f"Fallo al limpiar sesión para {subscriber_id}: {e}")
                 return f"Suscriptor '{host_name}' eliminado exitosamente."
 
     finally:
